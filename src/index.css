@@ -1,0 +1,308 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: dark;
+
+  /* App / canvas background */
+  --bg-app: #1e1e1e;
+
+  /* Surface elevation (Figma UI3 layered depth) */
+  --bg-surface: #2c2c2c;            /* level 1: panels, cards */
+  --bg-surface-elevated: #383838;   /* level 2: popovers, dropdowns, inputs */
+  --bg-surface-deep: #444444;       /* level 3: modals, deeply elevated overlays */
+  --bg-input: #242424;
+
+  /* Borders */
+  --border-base: #3b3b3b;           /* standard input / card border */
+  --border-strong: #4a4a4a;         /* active / selected border */
+  --border-subtle: #2a2a2a;         /* dividers, quiet separators */
+  --border-focus: #0c8ce9;          /* focus ring color */
+
+  /* Text */
+  --text-main: #f5f5f5;
+  --text-secondary: #b3b3b3;
+  --text-muted: #8c8c8c;
+
+  /* Buttons (default) */
+  --btn-default-bg: #383838;
+  --btn-default-hover: #444444;
+  --btn-default-text: #f5f5f5;
+
+  /* Depth / desk pattern */
+  --desk-pattern: radial-gradient(circle at center, #383838 1.2px, transparent 1.2px);
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
+  --shadow-panel: 0 10px 30px -5px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
+
+  /* Focus ring */
+  --focus-ring: #0c8ce9;
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* Disabled state */
+  --disabled-opacity: 40%;
+
+  /* Easing */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+html.light {
+  color-scheme: light;
+
+  /* App / canvas background */
+  --bg-app: #e5e5e5;
+
+  /* Surface elevation (Figma UI3 layered depth) */
+  --bg-surface: #ffffff;           /* level 1: panels, cards */
+  --bg-surface-elevated: #f2f2f2;  /* level 2: popovers, dropdowns, inputs */
+  --bg-surface-deep: #e5e5e5;      /* level 3: modals, deeply elevated overlays */
+  --bg-input: #f5f5f5;
+
+  /* Borders */
+  --border-base: #e5e5e5;          /* standard input / card border */
+  --border-strong: #d9d9d9;        /* active / selected border */
+  --border-subtle: #f0f0f0;        /* dividers, quiet separators */
+  --border-focus: #0c8ce9;         /* focus ring color */
+
+  /* Text */
+  --text-main: #111111;
+  --text-secondary: #555555;
+  --text-muted: #888888;
+
+  /* Buttons (default) */
+  --btn-default-bg: #f0f0f0;
+  --btn-default-hover: #e5e5e5;
+  --btn-default-text: #111111;
+
+  /* Depth / desk pattern */
+  --desk-pattern: radial-gradient(circle at center, #cfcfcf 1.2px, transparent 1.2px);
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.05);
+  --shadow-panel: 0 8px 24px -4px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
+
+  /* Focus ring */
+  --focus-ring: #0c8ce9;
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* Disabled state */
+  --disabled-opacity: 40%;
+
+  /* Easing */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Spacing scale (px): 4 / 8 / 12 / 16 / 20 / 24 / 28 / 32 / 40 / 48 / 56 / 64 / 80.
+   Base unit: 4px. Apply via Tailwind spacing utilities (p-, m-, gap-, space-) mapped to this scale. */
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+html {
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  color: white;
+  background: rgb(14 165 233 / 55%);
+}
+
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+button:not(:disabled) {
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 140ms var(--ease-out), color 150ms var(--ease-out), background-color 150ms var(--ease-out), border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out);
+}
+
+button:not(:disabled):active {
+  transform: scale(0.98);
+}
+
+.ui-swatch {
+  transition: transform 150ms var(--ease-out), box-shadow 150ms ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ui-swatch:hover {
+    transform: scale(1.03);
+  }
+}
+
+.ui-popover {
+  transform-origin: var(--transform-origin, top left);
+  transition: opacity 160ms var(--ease-out), transform 160ms var(--ease-out);
+}
+
+.ui-popover--top-right {
+  --transform-origin: top right;
+}
+
+.ui-popover--left {
+  --transform-origin: calc(100% - 16px) 24px;
+}
+
+.ui-select-popover {
+  transform-origin: var(--radix-select-content-transform-origin, top left);
+  transition: opacity 140ms var(--ease-out), transform 140ms var(--ease-out);
+}
+
+@starting-style {
+  .ui-select-popover {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+.ui-select-popover[data-state="closed"] {
+  opacity: 0;
+  transform: scale(0.98);
+}
+
+@starting-style {
+  .ui-popover {
+    opacity: 0;
+    transform: scale(0.97) translateY(-2px);
+  }
+}
+
+.ui-modal-overlay {
+  background: rgb(0 0 0 / 58%);
+  transition: opacity 180ms var(--ease-out);
+}
+
+.ui-modal-content {
+  inset: 50% auto auto 50%;
+  width: min(900px, calc(100vw - 32px));
+  max-height: min(88svh, 900px);
+  transform: translate(-50%, -50%);
+  transform-origin: center;
+  border-color: var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text-main);
+  box-shadow: var(--shadow-panel);
+  transition: opacity 180ms var(--ease-out), transform 180ms var(--ease-out);
+}
+
+@starting-style {
+  .ui-modal-overlay {
+    opacity: 0;
+  }
+
+  .ui-modal-content {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 6px)) scale(0.98);
+  }
+}
+
+/* Ensure Radix Popover and Portal dropdowns adapt properly */
+[data-radix-popper-content-wrapper] {
+  z-index: 60;
+}
+
+/* Keep the canvas usable on tablet and phone widths. Panels become drawers
+   over the workspace instead of squeezing the artboard into a narrow strip. */
+.editor-workspace-layout {
+  position: relative;
+  isolation: isolate;
+}
+
+@media (max-width: 900px) {
+  .editor-workspace-layout > #workspace-sidebar {
+    position: absolute;
+    z-index: 25;
+    inset-block: 0;
+    left: 3rem;
+    max-width: calc(100vw - 6rem);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .editor-workspace-layout > #inspector-sidebar {
+    position: absolute;
+    z-index: 25;
+    inset-block: 0;
+    right: 0;
+    max-width: calc(100vw - 3rem);
+    box-shadow: var(--shadow-panel);
+  }
+}
+
+@media (max-width: 540px) {
+  .editor-workspace-layout > #workspace-sidebar {
+    left: 2.5rem;
+    max-width: calc(100vw - 2.5rem);
+  }
+
+  .editor-workspace-layout > #inspector-sidebar {
+    max-width: calc(100vw - 2.5rem);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted) 32%, transparent);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  background-clip: padding-box;
+}
+
+* {
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 36%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  button:not(:disabled):active {
+    transform: none;
+  }
+}
