@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { nanoid } from "nanoid";
-import { Blocks, Check, Clock3, FolderOpen, Heart, ImagePlus, LayoutTemplate, Plus, Search, Sparkles, Star, Trash2, UploadCloud } from "lucide-react";
+import { Check, Clock3, Heart, ImagePlus, Plus, Search, Sparkles, Star, Trash2, UploadCloud } from "lucide-react";
 import { ingestImage } from "../../lib/image-ingest";
 import { captureAssets, deleteReusableComponent, loadAsset, loadReusableComponents, saveAsset, saveReusableComponent, type ReusableComponent } from "../../lib/idb";
 import { downloadBlob, slugify } from "../../lib/download";
@@ -11,11 +11,12 @@ import type { Layer, Slide } from "../../model/types";
 import { activeLayers, activeSlide, useEditorStore } from "../../model/store";
 import { applyLayout, createSlide } from "../../model/document";
 import { Button, Input, NativeSelect, SelectBox } from "../../app/ui";
+import { StylesPanel } from "./WorkspacePanel";
 import { SlidePreview } from "./SlidePreview";
 import { useShallow } from "zustand/react/shallow";
 import { readStoredJson, writeStoredValue } from "../../lib/safe-storage";
 
-export type LibraryTab = "templates" | "layouts" | "components" | "media";
+export type LibraryTab = "templates" | "layouts" | "components" | "styles" | "media";
 type TemplateView = "all" | "favorites" | "recent";
 type SavedTemplate = Omit<StarterTemplate, "create"> & { slide: Slide };
 
@@ -46,10 +47,17 @@ function dataUrlToBlob(dataUrl: string) {
   return new Blob([bytes], { type: mime });
 }
 
-export function Library({ tab: controlledTab, hideTabs = false }: { tab?: LibraryTab; hideTabs?: boolean } = {}) {
+export function Library({ tab: controlledTab, onTabChange }: { tab?: LibraryTab; onTabChange?: (tab: LibraryTab) => void } = {}) {
   const [localTab, setLocalTab] = useState<LibraryTab>("templates");
   const activeTab = controlledTab ?? localTab;
-  const setActiveTab = (tab: LibraryTab) => { if (!controlledTab) setLocalTab(tab); };
+  const setActiveTab = (tab: LibraryTab) => { if (!controlledTab) setLocalTab(tab); onTabChange?.(tab); };
+  const [layoutQuery, setLayoutQuery] = useState("");
+  const [styleQuery, setStyleQuery] = useState("");
+  const scrollArea = useRef<HTMLDivElement>(null);
+  const positions = useRef<Partial<Record<LibraryTab, number>>>({});
+  useLayoutEffect(() => {
+    if (scrollArea.current) scrollArea.current.scrollTop = positions.current[activeTab] ?? 0;
+  }, [activeTab]);
   const [templateCategory, setTemplateCategory] = useState<string>("all");
   const [templateView, setTemplateView] = useState<TemplateView>("all");
   const [templateQuery, setTemplateQuery] = useState("");
@@ -392,71 +400,37 @@ export function Library({ tab: controlledTab, hideTabs = false }: { tab?: Librar
     setSelectedAssetIds([]);
   };
 
+  const activeSearch = {
+    templates: [templateQuery, setTemplateQuery], layouts: [layoutQuery, setLayoutQuery],
+    components: [componentQuery, setComponentQuery], styles: [styleQuery, setStyleQuery], media: [mediaQuery, setMediaQuery],
+  } as const;
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-[var(--bg-surface)]">
-      {/* Box Tabs Header */}
-      {!hideTabs && <div className="border-b border-[var(--border-base)] p-3">
-        <div className="grid grid-cols-2 gap-1 rounded-lg bg-[var(--bg-input)] p-1 text-xs font-medium">
-          <button
-            type="button"
-            onClick={() => setActiveTab("templates")}
-            className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 transition ${
-              activeTab === "templates"
-                ? "bg-[var(--bg-surface)] font-semibold text-sky-500 shadow-sm"
-                : "text-[var(--text-secondary)] hover:text-[var(--text-main)]"
-              }`}
-          >
-            <Sparkles className="size-3.5" />
-            <span>Templates</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("layouts")}
-            className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 transition ${
-              activeTab === "layouts"
-                ? "bg-[var(--bg-surface)] font-semibold text-sky-500 shadow-sm"
-                : "text-[var(--text-secondary)] hover:text-[var(--text-main)]"
-            }`}
-          >
-            <LayoutTemplate className="size-3.5" />
-            <span>Layouts</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("components")}
-            className={`flex items-center justify-center gap-1 rounded-md py-1.5 transition ${activeTab === "components" ? "bg-[var(--bg-surface)] font-semibold text-sky-500 shadow-sm" : "text-[var(--text-secondary)] hover:text-[var(--text-main)]"}`}
-          >
-            <Blocks className="size-3.5" />
-              <span>Components</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("media")}
-            className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 transition ${
-              activeTab === "media"
-                ? "bg-[var(--bg-surface)] font-semibold text-sky-500 shadow-sm"
-                : "text-[var(--text-secondary)] hover:text-[var(--text-main)]"
-            }`}
-          >
-            <FolderOpen className="size-3.5" />
-            <span>Media</span>
-            {assetCount > 0 && (
-              <span className="rounded-full bg-sky-500/20 px-1.5 py-0.2 text-[10px] text-sky-600 dark:text-sky-300">
-                {assetCount}
-              </span>
-            )}
-          </button>
-        </div>
-      </div>}
+    <div className="flex h-full flex-col overflow-hidden bg-[var(--bg-surface)]" onKeyDown={event => {
+      const [query, setQuery] = activeSearch[activeTab];
+      if (event.key === "Escape" && query) {
+        event.preventDefault();
+        setQuery("");
+        scrollArea.current?.querySelector<HTMLInputElement>("[data-workspace-search]")?.focus();
+      }
+    }}>
+      <nav aria-label="Asset categories" className="flex shrink-0 flex-wrap gap-1 border-b border-[var(--border-base)] p-2">
+        {(["templates", "layouts", "components", "styles", "media"] as const).map(tab =>
+          <button type="button" key={tab} aria-pressed={tab === activeTab} onClick={() => setActiveTab(tab)}
+            className="rounded px-2 py-1 text-xs capitalize text-[var(--text-secondary)] hover:bg-[var(--bg-surface-elevated)] aria-pressed:bg-sky-500/12 aria-pressed:text-sky-500">
+            {tab[0].toUpperCase() + tab.slice(1)}
+          </button>)}
+      </nav>
 
       {/* Tab Panels */}
-      <div className="flex-1 overflow-y-auto p-4">
+      <div ref={scrollArea} role="region" aria-label="Asset previews" className="min-h-0 flex-1 overflow-y-auto p-3" onScroll={event => {
+        positions.current[activeTab] = event.currentTarget.scrollTop;
+      }}>
         {/* TEMPLATES TAB */}
         {activeTab === "templates" && (
           <div className="flex flex-col gap-3">
             <label className="relative block">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-[var(--text-muted)]" />
-              <input value={templateQuery} onChange={(event) => setTemplateQuery(event.target.value)} placeholder="Search templates" aria-label="Search templates" className="h-9 w-full rounded-lg border border-[var(--border-strong)] bg-[var(--bg-input)] pl-8 pr-3 text-xs text-[var(--text-main)] outline-none focus:border-sky-500" />
+              <input value={templateQuery} onChange={(event) => setTemplateQuery(event.target.value)} placeholder="Search templates" aria-label="Search templates" data-workspace-search className="h-9 w-full rounded-lg border border-[var(--border-strong)] bg-[var(--bg-input)] pl-8 pr-3 text-xs text-[var(--text-main)] outline-none focus:border-sky-500" />
             </label>
             <input ref={templatePackInputRef} type="file" accept=".ccpack,application/json" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importTemplatePack(file); }} />
             <div className="grid grid-cols-2 gap-1.5">
@@ -533,7 +507,9 @@ export function Library({ tab: controlledTab, hideTabs = false }: { tab?: Librar
               <span className="text-[11px] text-[var(--text-muted)]">{LAYOUTS.length} styles</span>
             </div>
             <div className="grid grid-cols-2 gap-2">
-              {LAYOUTS.map((layout) => {
+              <Input value={layoutQuery} onChange={event => setLayoutQuery(event.target.value)} placeholder="Search layouts"
+                aria-label="Search layouts" data-workspace-search className="col-span-full" />
+              {LAYOUTS.filter(layout => `${layout.label} ${layout.id}`.toLowerCase().includes(layoutQuery.trim().toLowerCase())).map((layout) => {
                 const isSelected = layoutId === layout.id;
                 const layoutSlide = applyLayout(layoutPreviewBase, layout.id);
                 layoutSlide.id = `layout-preview-${layout.id}`;
@@ -582,7 +558,7 @@ export function Library({ tab: controlledTab, hideTabs = false }: { tab?: Librar
             </div>
             <label className="relative block">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-[var(--text-muted)]" />
-              <input value={componentQuery} onChange={(event) => setComponentQuery(event.target.value)} placeholder="Search components" aria-label="Search components" className="h-9 w-full rounded-lg border border-[var(--border-strong)] bg-[var(--bg-input)] pl-8 pr-3 text-xs text-[var(--text-main)] outline-none focus:border-sky-500" />
+              <input value={componentQuery} onChange={(event) => setComponentQuery(event.target.value)} placeholder="Search components" aria-label="Search components" data-workspace-search className="h-9 w-full rounded-lg border border-[var(--border-strong)] bg-[var(--bg-input)] pl-8 pr-3 text-xs text-[var(--text-main)] outline-none focus:border-sky-500" />
             </label>
             {componentError && <p role="alert" className="rounded-md border border-rose-500/20 bg-rose-500/5 px-2.5 py-2 text-[11px] text-rose-500">{componentError}</p>}
             {visibleComponents.length ? <div className="grid grid-cols-2 gap-2">
@@ -601,6 +577,12 @@ export function Library({ tab: controlledTab, hideTabs = false }: { tab?: Librar
             </div> : <div className="rounded-lg border border-dashed border-[var(--border-base)] p-5 text-center text-[10px] leading-relaxed text-[var(--text-muted)]">{componentQuery ? "No components match this search." : "Select one or more canvas layers, then save them here for reuse."}</div>}
           </div>
         )}
+
+        {activeTab === "styles" && <>
+          <Input value={styleQuery} onChange={event => setStyleQuery(event.target.value)} placeholder="Search brand colors"
+            aria-label="Search brand colors" data-workspace-search />
+          <StylesPanel query={styleQuery} />
+        </>}
 
         {activeTab === "media" && (
           <div className="flex flex-col gap-4">
@@ -652,7 +634,7 @@ export function Library({ tab: controlledTab, hideTabs = false }: { tab?: Librar
 
             <label className="relative block">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-[var(--text-muted)]" />
-              <input value={mediaQuery} onChange={(event) => setMediaQuery(event.target.value)} placeholder="Search your media" aria-label="Search your media" className="h-9 w-full rounded-lg border border-[var(--border-strong)] bg-[var(--bg-input)] pl-8 pr-3 text-xs text-[var(--text-main)] outline-none focus:border-sky-500" />
+              <input value={mediaQuery} onChange={(event) => setMediaQuery(event.target.value)} placeholder="Search your media" aria-label="Search your media" data-workspace-search className="h-9 w-full rounded-lg border border-[var(--border-strong)] bg-[var(--bg-input)] pl-8 pr-3 text-xs text-[var(--text-main)] outline-none focus:border-sky-500" />
             </label>
             <div className="grid grid-cols-[1fr_auto] gap-1.5">
               <Input value={folderDraft} onChange={(event) => setFolderDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") createFolder(); }} placeholder="New folder name" aria-label="New media folder" />

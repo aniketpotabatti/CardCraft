@@ -79,6 +79,7 @@ export async function ingestVideo(file: File) {
   const url = URL.createObjectURL(file);
   try {
     video.muted = true;
+    video.preload = "auto";
     await new Promise<void>((resolve, reject) => {
       video.onloadeddata = () => resolve();
       video.onerror = () => reject(new Error("This browser cannot decode the video. Try an MP4 or WebM file."));

@@ -48,14 +48,56 @@ export interface Crop {
 }
 
 export interface LayerShadow {
+  effects?: LayerEffect[];
+  isolated?: boolean;
+  fills?: Paint[];
+  strokes?: Paint[];
+  exportSettings?: ExportConfiguration[];
+  name?: string;
   parentId?: string;
   strokeVisible?: boolean;
   blendMode?: BlendMode;
+  shadowEnabled?: boolean;
   shadow?: number;
   shadowColor?: string;
   shadowOpacity?: number;
   shadowOffsetX?: number;
   shadowOffsetY?: number;
+}
+
+export type ShaderPreset = "waves" | "halftone" | "glow";
+export type EffectKind = "drop-shadow" | "inner-shadow" | "layer-blur" | "background-blur" | "noise" | "glass" | "shader";
+export interface LayerEffect {
+  id: string;
+  kind: EffectKind;
+  visible: boolean;
+  legacy?: boolean;
+  x: number;
+  y: number;
+  blur: number;
+  spread: number;
+  color: string;
+  color2: string;
+  opacity: number;
+  progressive: boolean;
+  start: number;
+  end: number;
+  angle: number;
+  noiseMode: "mono" | "duo" | "multi";
+  sizeX: number;
+  sizeY: number;
+  density: number;
+  refraction: number;
+  depth: number;
+  dispersion: number;
+  frost: number;
+  splay: number;
+  intensity: number;
+  shader: ShaderPreset;
+}
+
+export function hasShadow(target: LayerShadow) {
+  return target.effects?.some(effect => effect.legacy && effect.visible) ?? (target.shadowEnabled ?? (target.shadow ?? 0) > 0);
 }
 
 export type BlendMode = "source-over" | "multiply" | "screen" | "overlay" | "darken" | "lighten" | "color-dodge" | "color-burn" | "hard-light" | "soft-light" | "difference" | "exclusion";
@@ -65,6 +107,21 @@ export interface AdditionalFill {
   color: string;
   opacity: number;
   visible: boolean;
+}
+
+export type GradientKind = "linear" | "radial" | "angular" | "diamond";
+export type GradientStop = { id: string; position: number; color: string; opacity: number };
+export type ImageAdjustment = "exposure" | "contrast" | "saturation" | "temperature" | "tint" | "highlights" | "shadows";
+export interface Paint extends AdditionalFill {
+  kind?: "solid" | "gradient" | "image" | "video" | "pattern" | "shader";
+  shader?: ShaderPreset;
+  gradient?: { type: GradientKind; x: number; y: number; angle: number; size: number; stops: GradientStop[] };
+  assetId?: string;
+  posterId?: string;
+  crop?: Crop;
+  fit?: "cover" | "contain";
+  adjustments?: Partial<Record<ImageAdjustment, number>>;
+  pattern?: { sourceId: string; scale: number; gapX: number; gapY: number; angle: number; align: "start" | "center" | "end" };
 }
 
 export interface LayerConstraints {
@@ -139,6 +196,23 @@ export interface ImageLayer extends LayerShadow {
   prototypeTargetSlideId?: string;
 }
 
+export interface StrokeStyle {
+  mode: "basic" | "dynamic" | "brush";
+  cap: "butt" | "round" | "square";
+  join: "miter" | "round" | "bevel";
+  position: "inside" | "center" | "outside";
+  start: "none" | "arrow" | "dot";
+  end: "none" | "arrow" | "dot";
+  dash: number;
+  gap: number;
+  profile: [number, number, number];
+  frequency: number;
+  wiggle: number;
+  smoothing: number;
+  brush: "felt" | "dry" | "chisel";
+  reverse: boolean;
+}
+
 export interface ShapeLayer extends LayerShadow {
   additionalFills?: AdditionalFill[];
   autoSizing?: LayerAutoSizing;
@@ -146,6 +220,7 @@ export interface ShapeLayer extends LayerShadow {
   type: "shape";
   id: string;
   shape: DrawingTool;
+  strokeStyle?: StrokeStyle;
   points?: Point[];
   sides?: number;
   x: number;
@@ -168,6 +243,8 @@ export interface ShapeLayer extends LayerShadow {
   groupId?: string;
   prototypeTargetSlideId?: string;
   isFrame?: boolean;
+  clipContent?: boolean;
+  layoutGuides?: LayoutGuide[];
   autoLayout?: SlideAutoLayout;
 }
 
@@ -208,12 +285,14 @@ export interface SlideAutoLayout {
 
 export interface ExportConfiguration {
   id: string;
-  format: "image/png" | "image/webp";
+  format: "image/png" | "image/webp" | "image/jpeg" | "image/svg+xml" | "application/pdf";
+  background?: string;
   scale: 1 | 2 | 3 | 4;
   suffix: string;
 }
 
 export interface BrandKit {
+  namedColors?: { name: string; color: string }[];
   name?: string;
   handle?: string;
   logoLight: string;
@@ -223,6 +302,7 @@ export interface BrandKit {
 }
 
 export interface Slide extends LayerShadow {
+  backgroundVisible?: boolean;
   id: string;
   aspect: AspectId;
   width: number;

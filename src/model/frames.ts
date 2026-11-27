@@ -51,3 +51,17 @@ export function orderedLayers(layers: Layer[], frontFirst = false) {
   layers.forEach(visit);
   return result;
 }
+
+export function frameTransform(frame: ShapeLayer) {
+  const x = frame.x + (frame.flipX ? frame.width : 0);
+  const y = frame.y + (frame.flipY ? frame.height : 0);
+  return new DOMMatrix().translate(x, y).rotate(frame.rotation).scale(frame.flipX ? -1 : 1, frame.flipY ? -1 : 1);
+}
+
+export function frameClipPath(frame: ShapeLayer) {
+  const local = new Path2D();
+  local.roundRect(0, 0, frame.width, frame.height, Math.max(0, frame.cornerRadius));
+  const path = new Path2D();
+  path.addPath(local, frameTransform(frame));
+  return path;
+}

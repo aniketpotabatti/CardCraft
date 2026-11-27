@@ -12,8 +12,10 @@ import { readStoredValue, writeStoredValue } from "../lib/safe-storage";
 
 type RemoteCursor = { id: number; name: string; color: string; x: number; y: number };
 
-export function CollaborationPanel({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const [room, setRoom] = useState("");
+export function CollaborationPanel({ open, onOpenChange, onRevealSelection }: { open: boolean; onOpenChange: (open: boolean) => void; onRevealSelection: () => void }) {
+  const [invitation] = useState(() => new URLSearchParams(location.search));
+  const [room, setRoom] = useState(() => invitation.get("room") ?? "");
+  const [linkStatus, setLinkStatus] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState(() => readStoredValue("cardcraft:collab-name") ?? "Designer");
   const [activeRoom, setActiveRoom] = useState("");
@@ -41,10 +43,26 @@ export function CollaborationPanel({ open, onOpenChange }: { open: boolean; onOp
     setConnected(false);
     setJoining(false);
     setActiveRoom("");
+    setLinkStatus("");
     setCursors([]);
   }, [setSharedBrandLocked]);
 
   useEffect(() => () => disconnect(), [disconnect]);
+
+  const copySelectionLink = async () => {
+    const state = useEditorStore.getState();
+    const url = new URL(location.pathname, location.origin);
+    url.searchParams.set("room", activeRoom);
+    url.searchParams.set("project", state.project.id);
+    url.searchParams.set("page", state.selectedSlideId);
+    if (state.selectedLayerIds.length === 1) url.searchParams.set("layer", state.selectedLayerIds[0]);
+    try {
+      await navigator.clipboard.writeText(url.href);
+      setLinkStatus("Link copied. Share the room passphrase separately.");
+    } catch {
+      setLinkStatus(url.href);
+    }
+  };
 
   const connect = (create: boolean) => {
     const roomId = create ? nanoid(12) : room.trim();
@@ -103,6 +121,15 @@ export function CollaborationPanel({ open, onOpenChange }: { open: boolean; onOp
       setConnected(true);
       setJoining(false);
       setActiveRoom(roomId);
+      if (!create && next && invitation.get("room") === roomId && invitation.get("project") === next.id) {
+        const page = next.slides.find(item => item.id === invitation.get("page"));
+        const target = page?.layers.find(item => item.id === invitation.get("layer"));
+        if (page) {
+          useEditorStore.getState().selectSlide(page.id);
+          if (target) useEditorStore.getState().selectLayer(target.id);
+          onRevealSelection();
+        }
+      }
     };
     provider.on("synced", ({ synced }) => { if (synced) shared(); });
     provider.awareness.setLocalStateField("user", {
@@ -203,6 +230,8 @@ export function CollaborationPanel({ open, onOpenChange }: { open: boolean; onOp
             <p className="text-xs text-[var(--text-muted)]">{peers} collaborator{peers === 1 ? "" : "s"} currently sharing a cursor.</p>
             {isRoomOwner && <Button variant="ghost" onClick={() => setSharedBrandLocked(!sharedBrandLocked)}>{sharedBrandLocked ? <UnlockKeyhole className="size-3.5" /> : <LockKeyhole className="size-3.5" />}{sharedBrandLocked ? "Unlock shared brand kit" : "Lock shared brand kit"}</Button>}
             {sharedBrandLocked && <p className="text-[11px] text-amber-800 dark:text-amber-200">Brand-kit editing is locked for collaborators in this room.</p>}
+            <Button onClick={() => void copySelectionLink()}>Copy selection link</Button>
+            {linkStatus && <p role="status" className="break-all">{linkStatus}</p>}
             <Button variant="danger" onClick={() => { disconnect(); onOpenChange(false); }}>Leave room</Button>
           </div>
         ) : joining ? (

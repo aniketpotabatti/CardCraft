@@ -1,9 +1,11 @@
 import { useState } from "react";
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
-import { ArrowUpRight, Check, ChevronDown, Circle, Code2, Hash, Image as ImageIcon, MessageSquare, Minus, MousePointer2, Paintbrush, Pencil, PenTool, Square, Star, Triangle, Type, X } from "lucide-react";
+import { ArrowUpRight, Check, ChevronDown, Circle, Command, Hash, Image as ImageIcon, MessageSquare, Minus, MousePointer2, Paintbrush, Pencil, PenTool, Square, Star, Triangle, Type, X } from "lucide-react";
 import { isInk, primitives, type Primitive } from "../model/drawing";
 import type { FigmaTool } from "../model/types";
 import type { StrokeStyle } from "../editor/canvas/DrawingSurface";
+
+const inkTools = [{ id: "pen", label: "Pen (P)", Icon: PenTool }, { id: "brush", label: "Brush (B)", Icon: Paintbrush }, { id: "pencil", label: "Pencil (Shift+P)", Icon: Pencil }] as const;
 
 interface FigmaToolbarProps {
   activeTool: FigmaTool;
@@ -13,8 +15,7 @@ interface FigmaToolbarProps {
   onStroke: (stroke: StrokeStyle) => void;
   onAddImage: () => void;
   onToggleComments: () => void;
-  onToggleCode: () => void;
-  devModeActive?: boolean;
+  onOpenCommands: () => void;
   commentsActive?: boolean;
   disabled?: boolean;
 }
@@ -26,11 +27,13 @@ export function FigmaToolbar({
   stroke, onStroke,
   onAddImage,
   onToggleComments,
-  onToggleCode,
-  devModeActive = false,
+  onOpenCommands,
   commentsActive = false,
   disabled = false,
 }: FigmaToolbarProps) {
+  const [lastInk, setLastInk] = useState<(typeof inkTools)[number]["id"]>("pen");
+  const currentInk = inkTools.find(tool => tool.id === (isInk(activeTool) ? activeTool : lastInk))!;
+  const selectInk = (id: typeof lastInk) => { setLastInk(id); onSelectTool(id); };
   const [lastShape, setLastShape] = useState<Primitive>("rect");
   const shapeTools = {
     rect: { label: "Rectangle", shortcut: "R", icon: Square }, line: { label: "Line", shortcut: "L", icon: Minus },
@@ -105,8 +108,16 @@ export function FigmaToolbar({
         <Type className="size-4" />
       </button>
 
-      {([{ id: "pen", label: "Pen (P)", Icon: PenTool }, { id: "brush", label: "Brush (B)", Icon: Paintbrush }, { id: "pencil", label: "Pencil (Shift+P)", Icon: Pencil }] as const).map(({ id, label, Icon }) =>
-        <button key={id} title={label} aria-label={label} aria-pressed={activeTool === id} onClick={() => onSelectTool(id)} className={baseButton + " size-8 " + (activeTool === id ? activeButton : inactiveButton)}><Icon size={16} /></button>)}
+      <div className="hidden lg:flex">{inkTools.map(({ id, label, Icon }) =>
+        <button key={id} title={label} aria-label={label} aria-pressed={activeTool === id} onClick={() => selectInk(id)} className={baseButton + " size-8 " + (activeTool === id ? activeButton : inactiveButton)}><Icon size={16} /></button>)}</div>
+      <div className="flex lg:hidden">
+        <button title={currentInk.label} aria-pressed={isInk(activeTool)} onClick={() => selectInk(currentInk.id)} className={baseButton + " size-8 " + (isInk(activeTool) ? activeButton : inactiveButton)}><currentInk.Icon size={16} /></button>
+        <Dropdown.Root><Dropdown.Trigger asChild><button aria-label="Drawing tools menu" className={baseButton + " w-4"}><ChevronDown size={12} /></button></Dropdown.Trigger>
+          <Dropdown.Portal><Dropdown.Content side="top" sideOffset={8} className="z-50 rounded-lg border border-[var(--border-base)] bg-[var(--bg-surface)] p-1 shadow-lg">
+            {inkTools.map(({ id, label, Icon }) => <Dropdown.Item key={id} onSelect={() => selectInk(id)} className="flex items-center gap-2 rounded px-3 py-2 text-xs outline-none data-[highlighted]:bg-sky-600 data-[highlighted]:text-white"><Icon size={14} />{label}</Dropdown.Item>)}
+          </Dropdown.Content></Dropdown.Portal>
+        </Dropdown.Root>
+      </div>
       {isInk(activeTool) && <div role="group" aria-label="Drawing stroke" className="absolute bottom-full left-1/2 mb-2 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-[var(--border-base)] bg-[var(--bg-surface)] p-2 shadow-lg">
         <input type="color" aria-label="Drawing color" value={stroke.color} onChange={e => onStroke({ ...stroke, color: e.target.value })} className="size-6" />
         <input type="number" aria-label="Stroke weight" min={1} max={200} value={stroke.weight} onChange={e => onStroke({ ...stroke, weight: Math.max(1, Math.min(200, Number(e.target.value))) })} className="w-11 bg-transparent text-xs" />
@@ -131,13 +142,12 @@ export function FigmaToolbar({
       {/* 8. Dev Mode Toggle (</>) */}
       <button
         type="button"
-        onClick={onToggleCode}
-        title="Dev Mode (Shift+D)"
+        onClick={onOpenCommands}
+        title="Command palette (Ctrl/⌘+K)"
         disabled={disabled}
-        aria-pressed={devModeActive}
-        className={`${baseButton} size-8 place-items-center ${devModeActive ? activeButton : inactiveButton}`}
+        className={`${baseButton} size-8 place-items-center ${inactiveButton}`}
       >
-        <Code2 className="size-4" />
+        <Command className="size-4" />
       </button>
     </div>
   );

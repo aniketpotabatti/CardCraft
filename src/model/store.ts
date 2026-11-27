@@ -1,6 +1,8 @@
+import { remapPaintSources } from "./paints";
+import { continuesSliderDrag } from "./slider-history";
 import { addToFrameTree, subtreeIds, orderedLayers } from "./frames";
 import { isOutline, type DrawingTool } from "./drawing";
-import type { ShapeLayer } from "./types";
+import type { ShapeLayer, StrokeStyle } from "./types";
 import { temporal } from "zundo";
 import { create } from "zustand";
 import { nanoid } from "nanoid";
@@ -64,6 +66,8 @@ interface EditorState {
   project: Project;
   selectedSlideId: string;
   selectedLayerIds: string[];
+  brushPreview?: { layerId: string; brush: StrokeStyle["brush"] };
+  paintFocus?: { layerId: string; paintId: string; slot: "fills" | "strokes" };
   cleanView: boolean;
   theme: "dark" | "light";
   hydrated: boolean;
@@ -107,9 +111,9 @@ interface EditorActions {
   setActiveTool: (tool: FigmaTool) => void;
   addFrame: (x: number, y: number, width: number, height: number) => void;
   setLayout: (layoutId: LayoutId) => void;
-  updateLayer: (id: string, patch: Partial<Layer>) => void;
+  updateLayer: (id: string, patch: Partial<Layer>, slideId?: string) => void;
   updateLayers: (updates: { id: string; patch: Partial<Layer> }[]) => void;
-  addText: () => void;
+  addText: (text?: string) => void;
   addShape: (shape?: DrawingTool, bounds?: Partial<ShapeLayer>) => void;
   placeImage: (assetId: string, slotId?: string, videoAssetId?: string) => void;
   setImageAsBackground: (layerId: string) => void;
@@ -166,7 +170,8 @@ function applySlideAutoLayout(slide: Slide): Slide {
     const fixed = visible.filter((layer) => layer.autoSizing?.height !== "fill").reduce((sum, layer) => sum + heightOf(layer), 0);
     const size = Math.max(1, (availableHeight - fixed - gap * (visible.length - 1)) / fillHeights.length);
     fillHeights.forEach((layer) => heights.set(layer.id, size));
-  } else if (settings.flow === "horizontal" && fillHeights.length) {
+  }
+  if (settings.flow === "horizontal" && fillHeights.length) {
     fillHeights.forEach((layer) => heights.set(layer.id, availableHeight));
   } else if (settings.flow === "vertical" && fillWidths.length) {
     fillWidths.forEach((layer) => widths.set(layer.id, availableWidth));
@@ -246,7 +251,7 @@ function reconcileFramePositions(previous: Slide, next: Slide): Slide {
     if (frame.type !== "shape" || !frame.isFrame || !frame.autoLayout) continue;
     const parent = current.get(frame.id)!;
     const children = [...current.values()].filter(child => child.parentId === frame.id);
-    const arranged = applySlideAutoLayout({ ...next, width: frame.width, height: frame.height, autoLayout: frame.autoLayout,
+    const arranged = applySlideAutoLayout({ ...next, width: parent.width, height: "height" in parent ? parent.height : frame.height, autoLayout: frame.autoLayout,
       layers: children.map(child => ({ ...child, parentId: undefined, x: child.x - parent.x, y: child.y - parent.y })) });
     for (const child of arranged.layers) {
       const before = current.get(child.id)!;
@@ -339,7 +344,7 @@ export const useEditorStore = create<Store>()(
             const projectChangedDuringHydration = get().project !== projectAtHydrationStart || get().hydrationAbandoned;
             if (saved?.slides?.length && !projectChangedDuringHydration) {
               set({
-                project: saved,
+                project: syncCounters(saved),
                 selectedSlideId: saved.slides[0].id,
                 selectedLayerIds: [],
                 assets,
@@ -436,7 +441,7 @@ export const useEditorStore = create<Store>()(
         set((state) => {
           const current = state.project.slides.find((slide) => slide.id === state.selectedSlideId);
           if (!current) return state;
-          const copy = duplicateSlide(current);
+          const copy = { ...duplicateSlide(current), name: (current.name || "Page") + " copy" };
           const index = state.project.slides.findIndex((slide) => slide.id === current.id);
           const slides = [...state.project.slides];
           slides.splice(index + 1, 0, copy);
@@ -502,6 +507,7 @@ export const useEditorStore = create<Store>()(
           const slide = state.project.slides.find((item) => item.id === state.selectedSlideId);
           if (!slide) return state;
           const frame: Layer = {
+            name: `Frame ${slide.layers.filter(item => item.type === "shape" && item.isFrame).length + 1}`,
             type: "shape",
             id: nanoid(),
             shape: "rect",
@@ -535,9 +541,9 @@ export const useEditorStore = create<Store>()(
           project: patchActiveSlide(state.project, state.selectedSlideId, (slide) => applyLayout(slide, layoutId)),
         })),
 
-      updateLayer: (id, patch) =>
+      updateLayer: (id, patch, slideId) =>
         set((state) => ({
-          project: patchActiveSlide(state.project, state.selectedSlideId, (slide) => ({
+          project: patchActiveSlide(state.project, slideId ?? state.selectedSlideId, (slide) => ({
             ...slide,
             layers: slide.layers.map((layer) => (layer.id === id ? ({ ...layer, ...patch } as Layer) : layer)),
           })),
@@ -557,13 +563,13 @@ export const useEditorStore = create<Store>()(
         };
       }),
 
-      addText: () =>
+      addText: (text = "New text") =>
         set((state) => {
           const slide = state.project.slides.find((item) => item.id === state.selectedSlideId);
           if (!slide) return state;
           const slot = textSlots(slide)[0];
           const layer = createTextLayer({
-            text: "New text",
+            text,
             x: slot?.x ?? slide.padding,
             y: slot?.y ?? slide.height / 3,
             width: slot?.width ?? slide.width - slide.padding * 2,
@@ -782,7 +788,7 @@ export const useEditorStore = create<Store>()(
             if (layer) {
               const groupId = layer.groupId ? (duplicatedGroups.get(layer.groupId) ?? nanoid()) : undefined;
               if (layer.groupId && groupId) duplicatedGroups.set(layer.groupId, groupId);
-              const copy = { ...layer, id: copiedIds.get(layerId)!, parentId: layer.parentId ? copiedIds.get(layer.parentId) ?? layer.parentId : undefined, groupId, x: layer.x + 20, y: layer.y + 20 } as Layer;
+              const copy = { ...layer, ...remapPaintSources(layer, copiedIds), id: copiedIds.get(layerId)!, parentId: layer.parentId ? copiedIds.get(layer.parentId) ?? layer.parentId : undefined, groupId, x: layer.x + 20, y: layer.y + 20 } as Layer;
               copies.push(copy);
             }
           }
@@ -814,6 +820,7 @@ export const useEditorStore = create<Store>()(
           return {
             ...structuredClone(layer),
             id: copiedIds.get(layer.id)!,
+            ...remapPaintSources(layer, copiedIds),
             parentId: layer.parentId ? copiedIds.get(layer.parentId) : undefined,
             groupId: layer.groupId ? groups.get(layer.groupId) : undefined,
             x: layer.x + offsetX,
@@ -936,7 +943,7 @@ export const useEditorStore = create<Store>()(
         const { project, selectedSlideId, selectedLayerIds } = state;
         return { project, selectedSlideId, selectedLayerIds } as Store;
       },
-      equality: (a, b) => a.project === b.project,
+      equality: (a, b) => a.project === b.project || continuesSliderDrag(a.project, b.project),
     },
   ),
 );

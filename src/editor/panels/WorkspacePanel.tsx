@@ -1,3 +1,4 @@
+import { pageName, layerName } from "../../model/names";
 import { frameAncestors, orderedLayers } from "../../model/frames";
 import { DndContext, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
@@ -6,103 +7,96 @@ import { Copy, Eye, EyeOff, Lock, Plus, Trash2, Unlock, ChevronDown, ChevronRigh
 import { useShallow } from "zustand/react/shallow";
 import { Button, Input } from "../../app/ui";
 import { activeLayers, activeSlide, useEditorStore } from "../../model/store";
-import { isImageLayer, isShapeLayer, isTextLayer } from "../../model/types";
 import { SlidePreview } from "./SlidePreview";
-import { useState } from "react";
-import { createTextLayer } from "../../model/document";
-import type { Layer, Slide } from "../../model/types";
+import { useEffect, useState, useRef } from "react";
+import type { Slide } from "../../model/types";
 
-export function FigmaLeftSidebar() {
-  const [activeTab, setActiveTab] = useState<"layers" | "assets">("layers");
+export function FigmaLeftSidebar({ onOpenPage, active }: { onOpenPage: () => void; active: boolean }) {
+  const [query, setQuery] = useState("");
   const [pagesCollapsed, setPagesCollapsed] = useState(false);
   const [layersCollapsed, setLayersCollapsed] = useState(false);
+  const slides = useEditorStore(state => state.project.slides);
+  const selected = useEditorStore(state => state.selectedLayerIds);
+  const results = useRef<HTMLDivElement>(null);
+  const search = useRef<HTMLInputElement>(null);
+  const term = query.trim().toLowerCase();
+  useEffect(() => {
+    if (selected.length) setLayersCollapsed(false);
+  }, [selected]);
+  const reveal = (pageId: string, layerId?: string) => {
+    const state = useEditorStore.getState();
+    state.selectSlide(pageId);
+    if (layerId) state.selectLayer(layerId);
+    setQuery("");
+    setPagesCollapsed(false);
+    setLayersCollapsed(false);
+    onOpenPage();
+    search.current?.focus();
+  };
+  const match = term ? slides.flatMap((page, index) => {
+    const name = pageName(page, index);
+    const pages = name.toLowerCase().includes(term) ? [{ pageId: page.id, label: name, layerId: undefined, detail: "Page" }] : [];
+    return [...pages, ...orderedLayers(page.layers, true).filter(layer => layerName(layer).toLowerCase().includes(term))
+      .map(layer => ({ pageId: page.id, layerId: layer.id, label: layerName(layer), detail: name }))];
+  }) : [];
 
-  return (
-    <div className="flex h-full flex-col text-[var(--text-secondary)]">
-      {/* Top Tabs: File / Assets matching Figma UI3 */}
-      <div className="flex items-center gap-4 border-b border-[var(--border-base)] px-3 py-2 text-xs font-medium">
-        <button
-          type="button"
-          onClick={() => setActiveTab("layers")}
-          className={`transition-colors ${
-            activeTab === "layers"
-              ? "font-semibold text-[var(--text-main)]"
-              : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
-          }`}
-        >
-          File
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab("assets")}
-          className={`transition-colors ${
-            activeTab === "assets"
-              ? "font-semibold text-[var(--text-main)]"
-              : "text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
-          }`}
-        >
-          Assets
-        </button>
-      </div>
-
-      {activeTab === "layers" ? (
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-          {/* Pages Collapsible Section */}
-          <div className="border-b border-[var(--border-base)]">
-            <div className="flex items-center justify-between px-3 py-2">
-              <button
-                type="button"
-                onClick={() => setPagesCollapsed(!pagesCollapsed)}
-                className="flex items-center gap-1.5 text-xs font-semibold text-[var(--text-main)] hover:text-[var(--text-main)]"
-              >
-                {pagesCollapsed ? (
-                  <ChevronRight className="size-3 text-[var(--text-muted)]" />
-                ) : (
-                  <ChevronDown className="size-3 text-[var(--text-muted)]" />
-                )}
-                <span>Pages</span>
-              </button>
-              <PagesHeaderActions />
-            </div>
-            {!pagesCollapsed && <PagesList />}
-          </div>
-
-          {/* Layers Collapsible Section */}
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-center justify-between px-3 py-2">
-              <button
-                type="button"
-                onClick={() => setLayersCollapsed(!layersCollapsed)}
-                className="flex items-center gap-1.5 text-xs font-semibold text-[var(--text-main)] hover:text-[var(--text-main)]"
-              >
-                {layersCollapsed ? (
-                  <ChevronRight className="size-3 text-[var(--text-muted)]" />
-                ) : (
-                  <ChevronDown className="size-3 text-[var(--text-muted)]" />
-                )}
-                <span>Layers</span>
-              </button>
-            </div>
-            {!layersCollapsed && (
-              <div className="min-h-0 flex-1">
-                <LayersList />
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <AssetsTabContent />
-      )}
+  return <div className="flex h-full min-h-0 flex-col text-[var(--text-secondary)]" onKeyDown={event => {
+    if (event.key === "Escape" && query) {
+      event.preventDefault();
+      setQuery("");
+      search.current?.focus();
+    }
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && term) {
+      const buttons = Array.from(results.current?.querySelectorAll("button") ?? []);
+      if (!buttons.length) return;
+      event.preventDefault();
+      const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      if (event.key === "ArrowUp" && i <= 0) search.current?.focus();
+      else buttons[Math.min(buttons.length - 1, i + (event.key === "ArrowDown" ? 1 : -1))]?.focus();
+    }
+  }}>
+    <div className="border-b border-[var(--border-base)] p-2">
+      <Input ref={search} aria-label="Search pages and layers" placeholder="Search pages and layers" data-workspace-search
+        value={query} onChange={event => setQuery(event.target.value)}
+        onKeyDown={event => { if (event.key === "Enter" && match[0]) reveal(match[0].pageId, match[0].layerId); }} />
     </div>
-  );
+    {term && <div ref={results} className="min-h-0 flex-1 overflow-y-auto p-2" aria-label="File search results">
+      {match.map(result => <button type="button" key={result.pageId + (result.layerId ?? "")} onClick={() => reveal(result.pageId, result.layerId)}
+        className="grid w-full gap-0.5 rounded px-2 py-1.5 text-left text-xs hover:bg-[var(--bg-surface-elevated)]">
+        <span className="truncate">{result.label}</span><span className="truncate text-[10px] text-[var(--text-muted)]">{result.detail}</span>
+      </button>)}
+      {!match.length && <p role="status" className="p-2 text-xs">No matching pages or layers.</p>}
+    </div>}
+    <div hidden={Boolean(term)} className={term ? "hidden" : "min-h-0 flex-1 overflow-y-auto"}>
+      <section className="border-b border-[var(--border-base)]">
+        <div className="flex items-center justify-between px-3 py-2">
+          <button type="button" aria-expanded={!pagesCollapsed} onClick={() => setPagesCollapsed(!pagesCollapsed)}
+            className="flex items-center gap-1.5 text-xs font-semibold">
+            {pagesCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />} Pages
+          </button>
+          <PagesHeaderActions onOpenPage={onOpenPage} />
+        </div>
+        <div hidden={pagesCollapsed}><PagesList onOpenPage={onOpenPage} /></div>
+      </section>
+      <section>
+        <div className="flex items-center px-3 py-2">
+          <button type="button" aria-expanded={!layersCollapsed} onClick={() => setLayersCollapsed(!layersCollapsed)}
+            className="flex items-center gap-1.5 text-xs font-semibold">
+            {layersCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />} Layers
+          </button>
+        </div>
+        <div hidden={layersCollapsed}><LayersList onOpenPage={onOpenPage} visible={active && !layersCollapsed && !term} /></div>
+      </section>
+    </div>
+  </div>;
 }
 
-function PagesHeaderActions() {
+function PagesHeaderActions({ onOpenPage }: { onOpenPage: () => void }) {
   const addSlide = useEditorStore((state) => state.addSlide);
   return (
     <button
       type="button"
-      onClick={addSlide}
+      onClick={() => { addSlide(); onOpenPage(); }}
       title="Add page"
       className="grid size-5 place-items-center rounded text-[var(--text-muted)] hover:bg-[var(--bg-surface-elevated)] hover:text-[var(--text-main)]"
     >
@@ -111,7 +105,7 @@ function PagesHeaderActions() {
   );
 }
 
-function PagesList() {
+function PagesList({ onOpenPage }: { onOpenPage: () => void }) {
   const slides = useEditorStore((state) => state.project.slides);
   const selectedId = useEditorStore((state) => state.selectedSlideId);
   const selectSlide = useEditorStore((state) => state.selectSlide);
@@ -133,14 +127,14 @@ function PagesList() {
             {slides.map((slide, index) => {
               const isSelected = slide.id === selectedId;
               const title =
-                slide.layers.find(isTextLayer)?.text.trim().split("\n")[0] || `Page ${index + 1}`;
+                pageName(slide, index);
               return (
                 <SortablePageItem
                   key={slide.id}
                   slide={slide}
                   title={title}
                   isSelected={isSelected}
-                  onSelect={() => selectSlide(slide.id)}
+                  onSelect={() => { selectSlide(slide.id); onOpenPage(); }}
                 />
               );
             })}
@@ -173,6 +167,7 @@ function SortablePageItem({
       onClick={onSelect}
       {...attributes}
       {...listeners}
+      aria-current={isSelected ? "page" : undefined}
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={`group flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${
         isSelected
@@ -186,32 +181,52 @@ function SortablePageItem({
   );
 }
 
-function LayersList() {
+function LayersList({ onOpenPage, visible }: { onOpenPage: () => void; visible: boolean }) {
   const slide = useEditorStore((state) => activeSlide(state));
   const selected = useEditorStore((state) => state.selectedLayerIds);
   const selectLayer = useEditorStore((state) => state.selectLayer);
   const toggleLayer = useEditorStore((state) => state.toggleLayer);
   const updateLayer = useEditorStore((state) => state.updateLayer);
-  const [query, setQuery] = useState("");
-
   const layers = slide?.layers ?? [];
   const byId = new Map(layers.map(layer => [layer.id, layer]));
-  const filtered = orderedLayers(layers, true)
-    .filter((layer) => layerName(layer).toLowerCase().includes(query.trim().toLowerCase()));
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const anchor = useRef<string | null>(null);
+  const rows = useRef<HTMLDivElement>(null);
+  const pending = useRef(false);
+  const selectLayers = useEditorStore(state => state.selectLayers);
+  const filtered = orderedLayers(layers, true).filter(layer => !frameAncestors(layer, byId).some(parent => collapsed.has(parent.id)));
+
+  useEffect(() => {
+    if (!selected.length) return;
+    const lookup = new Map(layers.map(layer => [layer.id, layer]));
+    const parents = selected.flatMap(id => lookup.has(id) ? frameAncestors(lookup.get(id)!, lookup) : []);
+    setCollapsed(previous => parents.some(parent => previous.has(parent.id))
+      ? new Set([...previous].filter(id => !parents.some(parent => parent.id === id))) : previous);
+    pending.current = true;
+  }, [selected, slide?.id]);
+  useEffect(() => {
+    if (!visible || !pending.current) return;
+    const row = rows.current?.querySelector('[data-selected="true"]');
+    if (!row) return;
+    row.scrollIntoView({ block: "nearest", inline: "nearest" });
+    pending.current = false;
+  }, [visible, selected, collapsed]);
+
+  function selectRow(event: React.MouseEvent, id: string) {
+    onOpenPage();
+    const start = filtered.findIndex(item => item.id === anchor.current);
+    const end = filtered.findIndex(item => item.id === id);
+    if (event.shiftKey && start >= 0) {
+      selectLayers(filtered.slice(Math.min(start, end), Math.max(start, end) + 1).map(item => item.id));
+    } else {
+      if (event.ctrlKey || event.metaKey) toggleLayer(id); else selectLayer(id);
+      anchor.current = id;
+    }
+  }
 
   return (
     <div className="flex h-full flex-col px-2 pb-2">
-      {layers.length > 5 && (
-        <div className="mb-2 px-1">
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search layers..."
-            className="h-7 text-xs"
-          />
-        </div>
-      )}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={rows}>
         {filtered.length ? (
           <div className="grid gap-0.5">
             {filtered.map((layer) => {
@@ -220,6 +235,7 @@ function LayersList() {
               return (
                 <div
                   key={layer.id}
+                  data-selected={isSelected}
                   style={{ paddingInlineStart: 6 + frameAncestors(layer, byId).length * 12 }}
                   className={`group flex min-w-0 items-center gap-1 rounded-lg px-2 py-1 transition-colors ${
                     isSelected
@@ -227,13 +243,15 @@ function LayersList() {
                       : "text-[var(--text-secondary)] hover:bg-[var(--bg-surface-elevated)] hover:text-[var(--text-main)]"
                   }`}
                 >
+                  {layer.type === "shape" && layer.isFrame && layers.some(child => child.parentId === layer.id) && <button type="button"
+                    aria-label={collapsed.has(layer.id) ? "Expand frame" : "Collapse frame"} aria-expanded={!collapsed.has(layer.id)}
+                    onClick={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(layer.id)) next.delete(layer.id); else next.add(layer.id); return next; })}>
+                    {collapsed.has(layer.id) ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                  </button>}
                   <button
                     type="button"
-                    onClick={(event) =>
-                      event.shiftKey || event.ctrlKey || event.metaKey
-                        ? toggleLayer(layer.id)
-                        : selectLayer(layer.id)
-                    }
+                    aria-pressed={isSelected}
+                    onClick={event => selectRow(event, layer.id)}
                     className="flex min-w-0 flex-1 items-center gap-2 truncate text-left text-xs"
                   >
                     <span className="shrink-0 text-[var(--text-muted)] group-hover:text-inherit">
@@ -292,100 +310,6 @@ function LayersList() {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function AssetsTabContent() {
-  const assets = useEditorStore((state) => state.assets);
-  const placeImage = useEditorStore((state) => state.placeImage);
-  const placeLayers = useEditorStore((state) => state.placeLayers);
-  const entries = Object.entries(assets);
-  const presets = [
-    { label: "CTA Button", bg: "#0969B5", width: 240, height: 72, radius: 12, text: "Learn more" },
-    { label: "Pill Tag", bg: "#6836AC", width: 144, height: 56, radius: 28, text: "New" },
-    { label: "Avatar Circle", bg: "#EC4899", width: 112, height: 112, radius: 56, text: "" },
-    { label: "Accent Card", bg: "#10B981", width: 320, height: 192, radius: 20, text: "" },
-  ];
-
-  function insertPreset(preset: (typeof presets)[number]) {
-    const { width, height, radius, bg, text } = preset;
-    const groupId = text ? "preset" : undefined;
-    const layers: Layer[] = [{
-      id: "background", type: "shape", shape: preset.label === "Avatar Circle" ? "ellipse" : "rect",
-      x: 0, y: 0, width, height, fill: bg, rotation: 0, cornerRadius: radius, groupId,
-    }];
-    if (text) {
-      const fontSize = 24;
-      layers.push(createTextLayer({
-        text, x: 0, y: (height - fontSize) / 2, width, fontSize, lineHeight: 1,
-        fontWeight: 600, align: "center", color: "#FFFFFF", groupId,
-      }));
-    }
-    placeLayers(layers);
-  }
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
-      {/* Quick Canva Elements */}
-      <div className="mb-4">
-        <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-          Quick Elements
-        </h3>
-        <div className="grid grid-cols-2 gap-2">
-          {presets.map((preset) => (
-            <button
-              key={preset.label}
-              type="button"
-              onClick={() => insertPreset(preset)}
-              className="flex items-center gap-2 rounded-xl border border-[var(--border-base)] bg-[var(--bg-surface-elevated)] p-2 text-left transition hover:border-[#0c8ce9] hover:shadow-sm"
-            >
-              <div
-                className="size-5 shrink-0 rounded-md"
-                style={{ backgroundColor: preset.bg, height: 20 * preset.height / preset.width, borderRadius: 20 * preset.radius / preset.width }}
-              />
-              <span className="truncate text-[11px] font-medium text-[var(--text-main)]">
-                {preset.label}
-              </span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-          Image Uploads
-        </h3>
-        <span className="text-[10px] text-[var(--text-muted)]">{entries.length} items</span>
-      </div>
-
-      {entries.length === 0 ? (
-        <div className="grid h-32 place-items-center rounded-xl border border-dashed border-[var(--border-strong)] p-4 text-center text-xs text-[var(--text-muted)]">
-          No uploaded images yet. Drop photos onto the canvas to save them to your library.
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-2">
-          {entries.map(([id, asset]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => placeImage(id)}
-              className="group relative flex flex-col items-center gap-1.5 rounded-xl border border-[var(--border-base)] bg-[var(--bg-surface-elevated)] p-2 transition hover:border-[#0c8ce9] hover:shadow-md"
-            >
-              <div className="flex h-16 w-full items-center justify-center overflow-hidden rounded-lg bg-[var(--bg-input)]">
-                <img
-                  src={asset.url}
-                  alt={asset.name}
-                  className="max-h-full max-w-full object-contain"
-                />
-              </div>
-              <span className="w-full truncate text-center text-[10px] text-[var(--text-secondary)] group-hover:text-[var(--text-main)]">
-                {asset.name}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -477,7 +401,7 @@ function SortablePage({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: slide.id,
   });
-  const title = slide.layers.find(isTextLayer)?.text.trim().split("\n")[0] || `Page ${index + 1}`;
+  const title = pageName(slide, index);
   return (
     <button
       ref={setNodeRef}
@@ -624,7 +548,7 @@ export function LayersPanel() {
   );
 }
 
-export function StylesPanel() {
+export function StylesPanel({ query = "" }: { query?: string } = {}) {
   const brand = useEditorStore((state) => state.project.brand);
   const selectedIds = useEditorStore((state) => state.selectedLayerIds);
   const slide = useEditorStore((state) => activeSlide(state));
@@ -655,7 +579,7 @@ export function StylesPanel() {
           <span className="text-[9px] text-[var(--text-muted)]">{brand.palette.length} tokens</span>
         </div>
         <div className="flex flex-wrap gap-2">
-          {brand.palette.map((value, index) => (
+          {[...new Set([...brand.palette, ...(brand.namedColors ?? []).map(color => color.color)])].filter(value => (value + " " + (brand.namedColors?.find(color => color.color.toLowerCase() === value.toLowerCase())?.name ?? "")).toLowerCase().includes(query.trim().toLowerCase())).map((value, index) => (
             <button
               key={`${value}-${index}`}
               type="button"
@@ -749,11 +673,4 @@ export function StylesPanel() {
       </section>
     </div>
   );
-}
-
-function layerName(layer: NonNullable<ReturnType<typeof activeLayers>[number]>) {
-  if (isTextLayer(layer)) return layer.text.trim().split("\n")[0] || "Text layer";
-  if (isImageLayer(layer)) return "Image layer";
-  if (isShapeLayer(layer)) return layer.isFrame ? "Frame" : layer.shape === "rect" ? "Rectangle" : layer.shape[0].toUpperCase() + layer.shape.slice(1);
-  return "Layer";
 }

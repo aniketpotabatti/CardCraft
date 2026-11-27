@@ -1,3 +1,4 @@
+import { remapPaintSources } from "./paints";
 import { nanoid } from "nanoid";
 import { imageSlots, textSlots } from "./layouts";
 import {
@@ -157,7 +158,7 @@ export function createProject(): Project {
   return {
     id: nanoid(),
     name: "Untitled cards",
-    slides: [slide],
+    slides: [{ ...slide, name: "Page 1" }],
     brand: { ...DEFAULT_BRAND, palette: [...DEFAULT_BRAND.palette] },
     updatedAt: Date.now(),
   };
@@ -253,6 +254,7 @@ export function syncCounters(project: Project): Project {
     ...project,
     slides: project.slides.map((slide, index) => ({
       ...slide,
+      name: slide.name || `Page ${index + 1}`,
       layers: slide.layers.map((layer) =>
         isTextLayer(layer) && layer.role === "counter"
           ? { ...layer, text: `${index + 1} / ${total}` }
@@ -269,7 +271,7 @@ export function duplicateSlide(slide: Slide): Slide {
     id: nanoid(),
     watermark: { ...slide.watermark },
     background: { ...slide.background },
-    layers: slide.layers.map((layer) => ({ ...layer, id: ids.get(layer.id)!, parentId: layer.parentId ? ids.get(layer.parentId) : undefined })),
+    layers: slide.layers.map((layer) => ({ ...layer, ...remapPaintSources(layer, ids), id: ids.get(layer.id)!, parentId: layer.parentId ? ids.get(layer.parentId) : undefined })),
   };
 }
 

@@ -38,6 +38,7 @@ export function DrawingSurface({ tool, scale, style }: { tool: DrawingTool; scal
       if (e.button !== 0) return;
       const point = at(e);
       if (pen) {
+        e.currentTarget.setPointerCapture(e.pointerId);
         const last = live.current.at(-1);
         if (!last || last.x !== point.x || last.y !== point.y) update([...live.current, point]);
       } else {
@@ -47,7 +48,12 @@ export function DrawingSurface({ tool, scale, style }: { tool: DrawingTool; scal
     }}
     onDoubleClick={() => { if (pen && live.current.length > 1) finish(live.current); }}
     onPointerMove={e => {
-      if (pen || !e.currentTarget.hasPointerCapture(e.pointerId) || !live.current.length) return;
+      if (!e.currentTarget.hasPointerCapture(e.pointerId) || !live.current.length) return;
+      if (pen) {
+        const last = live.current[live.current.length - 1], tip = at(e);
+        update([...live.current.slice(0, -1), { ...last, handleX: tip.x - last.x, handleY: tip.y - last.y }]);
+        return;
+      }
       setModifiers({ shift: e.shiftKey, alt: e.altKey });
       update(isInk(tool) ? [...live.current, at(e)] : [live.current[0], at(e)]);
     }}

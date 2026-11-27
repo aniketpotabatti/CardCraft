@@ -1,12 +1,12 @@
 import { isInk, type Ink } from "../model/drawing";
 import type { StrokeStyle } from "../editor/canvas/DrawingSurface";
-import { Blocks, ChevronLeft, ChevronRight, ClipboardCheck, FileStack, FolderOpen, History, ImagePlus, Layers3, LayoutGrid, LayoutTemplate, Maximize2, MessageCircle, Minimize2, Moon, Palette, PanelLeftClose, PanelRightClose, PanelRightOpen, Play, Plus, Redo2, SlidersHorizontal, Sparkles, Sun, Trash2, Undo2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ClipboardCheck, FileStack, FolderOpen, History, LayoutGrid, Maximize2, MessageCircle, Minimize2, Moon, PanelLeftClose, PanelRightClose, PanelRightOpen, Play, Plus, Redo2, SlidersHorizontal, Sparkles, Sun, Trash2, Undo2 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { nanoid } from "nanoid";
 import { ShareMenu } from "../editor/panels/ShareMenu";
 import { Inspector, PrototypeInspector } from "../editor/panels/Inspector";
 import { Library, type LibraryTab } from "../editor/panels/Library";
-import { FigmaLeftSidebar, StylesPanel } from "../editor/panels/WorkspacePanel";
+import { FigmaLeftSidebar } from "../editor/panels/WorkspacePanel";
 import { FigmaToolbar } from "./FigmaToolbar";
 import { ZoomControl } from "./ZoomControl";
 import { ReviewPanel } from "../editor/panels/ReviewPanel";
@@ -28,9 +28,10 @@ import { getStudioStage } from "../editor/canvas/stage-ref";
 import { readStoredValue, writeStoredValue } from "../lib/safe-storage";
 import { isProjectDocument } from "../model/validation";
 
+const AssistantPanel = lazy(() => import("../editor/panels/AssistantPanel").then(module => ({ default: module.AssistantPanel })));
 const CollaborationPanel = lazy(() => import("../collab/CollaborationPanel").then((module) => ({ default: module.CollaborationPanel })));
 const StageCanvas = lazy(() => import("../editor/canvas/StageCanvas").then((module) => ({ default: module.StageCanvas })));
-type WorkspacePanelId = "pages" | "layers" | "styles" | LibraryTab;
+type WorkspacePanelId = "file" | "assets" | "assistant";
 type PanelSide = "left" | "right";
 type WorkspacePanelPreferences = {
   leftWidth: number;
@@ -110,13 +111,9 @@ function PanelResizeHandle({ side, width, onResize }: { side: PanelSide; width: 
 }
 
 const WORKSPACE_TOOLS: { id: WorkspacePanelId; label: string; icon: typeof FileStack }[] = [
-  { id: "pages", label: "Pages", icon: FileStack },
-  { id: "layers", label: "Layers", icon: Layers3 },
-  { id: "styles", label: "Styles", icon: Palette },
-  { id: "templates", label: "Templates", icon: Sparkles },
-  { id: "layouts", label: "Layouts", icon: LayoutTemplate },
-  { id: "components", label: "Components", icon: Blocks },
-  { id: "media", label: "Media", icon: ImagePlus },
+  { id: "file", label: "File", icon: FileStack },
+  { id: "assets", label: "Assets", icon: FolderOpen },
+  { id: "assistant", label: "Assistant", icon: Sparkles },
 ];
 
 export function AppShell() {
@@ -152,9 +149,14 @@ export function AppShell() {
   const [projectsError, setProjectsError] = useState("");
   const [pendingImport, setPendingImport] = useState<{ project: Project; assets: Record<string, Blob>; fileName: string; conflict: boolean } | null>(null);
   const [importing, setImporting] = useState(false);
-  const [collaborationMounted, setCollaborationMounted] = useState(false);
-  const [collaborationOpen, setCollaborationOpen] = useState(false);
-  const [activeLeftPanel, setActiveLeftPanel] = useState<WorkspacePanelId>("pages");
+  const [collaborationMounted, setCollaborationMounted] = useState(() => new URLSearchParams(location.search).has("room"));
+  const [collaborationOpen, setCollaborationOpen] = useState(() => new URLSearchParams(location.search).has("room"));
+  const [activeLeftPanel, setActiveLeftPanel] = useState<WorkspacePanelId>("file");
+  const [assetTab, setAssetTab] = useState<LibraryTab>("templates");
+  const [assistantMounted, setAssistantMounted] = useState(false);
+  const [assistantFloating, setAssistantFloating] = useState(false);
+  const [assistantMount, setAssistantMount] = useState<HTMLDivElement | null>(null);
+  const lastFilePanel = useRef<"file" | "assets">("file");
   const [panelPreferences, setPanelPreferences] = useState(readWorkspacePanelPreferences);
   const { leftOpen: leftPanelOpen, rightOpen: rightPanelOpen, leftWidth: leftPanelWidth, rightWidth: rightPanelWidth } = panelPreferences;
   const [rightPanelTab, setPanelTab] = useState<"design" | "prototype" | "review" | "comments">("design");
@@ -223,23 +225,51 @@ export function AppShell() {
     return returnToInfiniteCanvas ? () => setBoardMode(true) : undefined;
   }, [boardMode]);
 
-  const selectWorkspacePanel = (panel: WorkspacePanelId) => {
-    if (leftPanelOpen && activeLeftPanel === panel) setLeftPanelOpen(false);
-    else {
-      setActiveLeftPanel(panel);
-      setLeftPanelOpen(true);
-    }
+  const focusRail = (panel: WorkspacePanelId) => {
+    document.querySelector<HTMLButtonElement>(`[data-workspace-rail="${panel}"]`)?.focus({ preventScroll: true });
   };
+  const closeLeftPanel = () => {
+    setLeftPanelOpen(false);
+    focusRail(activeLeftPanel);
+  };
+  const openWorkspacePanel = (panel: WorkspacePanelId) => {
+    if (panel === "assistant") setAssistantMounted(true);
+    else lastFilePanel.current = panel;
+    if (panel === "assistant" && assistantFloating) {
+      setFocusMode(false);
+      document.querySelector<HTMLElement>('[aria-label="Gemini Assistant"]')?.focus();
+      return;
+    }
+    setFocusMode(false);
+    setActiveLeftPanel(panel);
+    setLeftPanelOpen(true);
+  };
+  const selectWorkspacePanel = (panel: WorkspacePanelId) => {
+    if (leftPanelOpen && activeLeftPanel === panel) closeLeftPanel();
+    else openWorkspacePanel(panel);
+  };
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (!leftPanelOpen || focusMode || preview || activeLeftPanel === "assistant" || event.defaultPrevented ||
+          event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey ||
+          document.querySelector('[role="dialog"][data-state="open"]') ||
+          (event.target as HTMLElement | null)?.closest('input,textarea,select,[contenteditable="true"]')) return;
+      const input = document.querySelector<HTMLInputElement>(`[data-workspace-panel="${activeLeftPanel}"] [data-workspace-search]`);
+      if (input) { event.preventDefault(); input.focus(); }
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, [activeLeftPanel, focusMode, leftPanelOpen, preview]);
 
   const commands: PaletteCommand[] = [
-    ...WORKSPACE_TOOLS.map(({ id, label }) => ({ id: `panel-${id}`, label: `Open ${label}`, group: "Workspace", run: () => { setFocusMode(false); setActiveLeftPanel(id); setLeftPanelOpen(true); } })),
+    ...WORKSPACE_TOOLS.map(({ id, label }) => ({ id: `panel-${id}`, label: `Open ${label}`, group: "Workspace", run: () => openWorkspacePanel(id) })),
     { id: "add-text", label: "Add text", group: "Insert", run: addText },
     { id: "add-shape", label: "Add shape", group: "Insert", run: addShape },
     { id: "board", label: boardMode ? "Return to page editor" : "Open infinite canvas", group: "View", run: () => setBoardMode((value) => !value) },
     { id: "focus-mode", label: focusMode ? "Exit distraction-free canvas" : "Collapse panels for focus", group: "View", run: () => setFocusMode((value) => !value) },
     { id: "fit", label: "Fit page to workspace", group: "View", run: () => setZoom(1) },
     { id: "safe-guides", label: "Toggle safe area guides", group: "View", run: toggleSafeGuides },
-    { id: "toggle-left", label: leftPanelOpen ? "Collapse Pages panel" : "Expand Pages panel", group: "View", run: () => setLeftPanelOpen(!leftPanelOpen) },
+    { id: "toggle-left", label: leftPanelOpen ? "Collapse workspace panel" : "Expand workspace panel", group: "View", run: () => setLeftPanelOpen(!leftPanelOpen) },
     { id: "toggle-right", label: rightPanelOpen ? "Collapse Inspector panel" : "Expand Inspector panel", group: "View", run: () => setRightPanelOpen(!rightPanelOpen) },
     { id: "history", label: "Open version history", group: "Project", run: () => setHistoryOpen(true) },
     { id: "save", label: "Save project now", group: "Project", run: persist },
@@ -361,7 +391,7 @@ export function AppShell() {
     }
   };
 
-  const activePanelTitle = WORKSPACE_TOOLS.find((tool) => tool.id === activeLeftPanel)?.label ?? "Pages";
+  const activePanelTitle = WORKSPACE_TOOLS.find((tool) => tool.id === activeLeftPanel)?.label ?? "File";
 
   const exportProjectJson = async () => {
     const assetBlobs: Record<string, string> = {};
@@ -616,6 +646,14 @@ export function AppShell() {
     <div className="relative flex h-svh flex-col bg-[var(--bg-app)] text-[var(--text-main)] transition-colors">
       <Keyboard beforeExport={prepareCanvasForExport} />
       <ShortcutsModal open={showShortcuts} onOpenChange={toggleShortcuts} />
+      {assistantMounted && <Suspense fallback={null}><AssistantPanel key={project.id} mount={assistantMount} floating={assistantFloating}
+        visible={!preview && !focusMode && (assistantFloating || (leftPanelOpen && activeLeftPanel === "assistant"))}
+        onFloat={() => { setAssistantFloating(true); setActiveLeftPanel(lastFilePanel.current); }}
+        onDock={() => { setAssistantFloating(false); setActiveLeftPanel("assistant"); setLeftPanelOpen(true); }}
+        onClose={() => {
+          if (assistantFloating) { setAssistantFloating(false); focusRail("assistant"); }
+          else closeLeftPanel();
+        }} /></Suspense>}
       <CommandPalette open={commandPaletteOpen} onClose={() => setCommandPaletteOpen(false)} commands={commands} />
       <HistoryPanel open={historyOpen} onOpenChange={setHistoryOpen} />
       <Modal open={projectsOpen} onOpenChange={setProjectsOpen} title="Your projects">
@@ -664,7 +702,7 @@ export function AppShell() {
           </div>
         </div>}
       </Modal>
-      {collaborationMounted && <Suspense fallback={null}><CollaborationPanel open={collaborationOpen} onOpenChange={setCollaborationOpen} /></Suspense>}
+      {collaborationMounted && <Suspense fallback={null}><CollaborationPanel open={collaborationOpen} onOpenChange={setCollaborationOpen} onRevealSelection={() => { setBoardMode(false); setActiveTool("move"); }} /></Suspense>}
       <header className="z-20 flex h-12 shrink-0 items-center gap-2 border-b border-[var(--border-base)] bg-[var(--bg-surface)] px-3 shadow-sm">
         <div className="grid size-7 shrink-0 place-items-center rounded-lg bg-sky-500 text-xs font-black text-white shadow-sm">C</div>
         <Button variant="ghost" className="h-8 px-2" onClick={() => { setProjectsOpen(true); void refreshProjects(); }} title="Open saved projects"><FolderOpen className="size-3.5" /></Button>
@@ -724,17 +762,18 @@ export function AppShell() {
               aria-label="Workspace tools"
             >
               <nav className="grid w-full gap-1.5 px-1.5" aria-label="Open workspace panel">
-                {WORKSPACE_TOOLS.map(({ id, label, icon: Icon }, index) => (
+                {WORKSPACE_TOOLS.map(({ id, label, icon: Icon }) => (
                   <div key={id}>
-                    {index === 3 && <div className="mx-2 my-2 h-px bg-[var(--border-base)]" />}
                     <button
                       type="button"
                       onClick={() => selectWorkspacePanel(id)}
                       title={label}
                       aria-label={label}
-                      aria-pressed={activeLeftPanel === id}
+                      data-workspace-rail={id}
+                      aria-pressed={activeLeftPanel === id || (id === "assistant" && assistantFloating)}
+                      aria-expanded={(leftPanelOpen && activeLeftPanel === id) || (id === "assistant" && assistantFloating)}
                       className={`grid size-9 place-items-center rounded-xl transition-all ${
-                        activeLeftPanel === id && leftPanelOpen
+                        (activeLeftPanel === id && leftPanelOpen) || (id === "assistant" && assistantFloating)
                           ? "bg-[#0c8ce9] text-white shadow-sm"
                           : "text-[var(--text-muted)] hover:bg-[var(--bg-surface-elevated)] hover:text-[var(--text-main)]"
                       }`}
@@ -749,6 +788,12 @@ export function AppShell() {
             {/* Floating Left Island Sidebar */}
             <aside
               id="workspace-sidebar"
+              onKeyDown={event => {
+                if (event.key !== "Escape" || event.defaultPrevented || activeLeftPanel === "assistant") return;
+                event.preventDefault();
+                event.stopPropagation();
+                closeLeftPanel();
+              }}
               aria-hidden={!leftPanelOpen}
               inert={!leftPanelOpen}
               style={{
@@ -760,7 +805,7 @@ export function AppShell() {
                 leftPanelOpen ? "border border-[var(--border-base)]" : "border-0"
               }`}
             >
-              <div className="flex h-11 shrink-0 items-center justify-between border-b border-[var(--border-base)] px-3.5">
+              {activeLeftPanel !== "assistant" && <div className="flex h-11 shrink-0 items-center justify-between border-b border-[var(--border-base)] px-3.5">
                 <div className="min-w-0">
                   <h2 className="truncate text-xs font-semibold text-[var(--text-main)]">
                     {activePanelTitle}
@@ -769,22 +814,22 @@ export function AppShell() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setLeftPanelOpen(false)}
+                  onClick={closeLeftPanel}
                   title={`Collapse ${activePanelTitle} panel`}
                   aria-label={`Collapse ${activePanelTitle} panel`}
                   className="grid size-7 shrink-0 place-items-center rounded-lg text-[var(--text-muted)] hover:bg-[var(--bg-surface-elevated)] hover:text-[var(--text-main)]"
                 >
                   <PanelLeftClose className="size-3.5" />
                 </button>
-              </div>
+              </div>}
               <div className="min-h-0 flex-1">
-                {activeLeftPanel === "pages" || activeLeftPanel === "layers" ? (
-                  <FigmaLeftSidebar />
-                ) : activeLeftPanel === "styles" ? (
-                  <StylesPanel />
-                ) : (
-                  <Library tab={activeLeftPanel} hideTabs />
-                )}
+                <div data-workspace-panel="file" hidden={activeLeftPanel !== "file"} className="h-full">
+                  <FigmaLeftSidebar active={leftPanelOpen && activeLeftPanel === "file"} onOpenPage={() => { setBoardMode(false); setActiveTool("move"); }} />
+                </div>
+                <div data-workspace-panel="assets" hidden={activeLeftPanel !== "assets"} className="h-full">
+                  <Library tab={assetTab} onTabChange={setAssetTab} />
+                </div>
+                <div ref={setAssistantMount} hidden={activeLeftPanel !== "assistant"} className="h-full" />
               </div>
               <PanelResizeHandle
                 side="left"
@@ -877,15 +922,15 @@ export function AppShell() {
                     stroke={inkStyles[ink]}
                     onStroke={stroke => setInkStyles(styles => ({ ...styles, [ink]: stroke }))}
                     onAddImage={() => {
-                      setActiveLeftPanel("media");
-                      setLeftPanelOpen(true);
+                      setAssetTab("media");
+                      openWorkspacePanel("assets");
                       imageInputRef.current?.click();
                     }}
                     onToggleComments={() => {
                       setRightPanelTab("comments");
                       setRightPanelOpen(true);
                     }}
-                    onToggleCode={() => {
+                    onOpenCommands={() => {
                       setCommandPaletteOpen(true);
                     }}
                     commentsActive={activeTool === "comments"}
@@ -1071,7 +1116,7 @@ export function AppShell() {
               </div>
               <div className="min-h-0 flex-1">
                 {rightPanelTab === "design" ? (
-                  <Inspector onBeforeExport={prepareCanvasForExport} />
+                  <Inspector onBeforeExport={prepareCanvasForExport} onOpenAssistant={() => openWorkspacePanel("assistant")} />
                 ) : rightPanelTab === "prototype" ? (
                   <PrototypeInspector onPreview={() => startPresentation("device")} />
                 ) : rightPanelTab === "review" ? (

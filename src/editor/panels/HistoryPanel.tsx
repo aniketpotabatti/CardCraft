@@ -1,3 +1,4 @@
+import { pageName } from "../../model/names";
 import { useCallback, useEffect, useState } from "react";
 import { nanoid } from "nanoid";
 import { Clock3, GitCompareArrows, RotateCcw, Trash2 } from "lucide-react";
@@ -139,6 +140,5 @@ function ComparisonColumn({ label, project, createdAt, layerCount }: { label: st
 }
 
 function slideName(slide: Project["slides"][number], index: number) {
-  const title = slide.layers.find((layer) => layer.type === "text" && layer.text.trim()) as Extract<Project["slides"][number]["layers"][number], { type: "text" }> | undefined;
-  return title ? `“${title.text.slice(0, 40)}”` : `Slide ${index + 1}`;
+  return pageName(slide, index);
 }

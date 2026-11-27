@@ -1,5 +1,16 @@
+import { VectorStrokeControls } from "./VectorStrokeControls";
+import { paintsFor, type PaintSlot } from "../../model/paints";
+import { PaintOptions } from "./PaintOptions";
+import type { Paint, ShapeLayer } from "../../model/types";
+import type { AssetInfo } from "../../model/store";
+import { createPortal } from "react-dom";
+import { beginSliderDrag, applySliderChange } from "../../model/slider-history";
+import { effectsFor } from "../../model/effects";
+import { EffectControls } from "./EffectControls";
+import { pageName, layerName } from "../../model/names";
+import { frameAncestors } from "../../model/frames";
 import { primitives, isInk } from "../../model/drawing";
-import { useEffect, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
   AlignCenter,
@@ -19,7 +30,6 @@ import {
   FlipHorizontal2,
   FlipVertical2,
   Lock,
-  MoreHorizontal,
   MoveDiagonal,
   Pipette,
   Play,
@@ -37,7 +47,6 @@ import {
 } from "lucide-react";
 import { Button, Field, Input, Range, SelectBox, Toggle } from "../../app/ui";
 import { AngleWheel } from "../overlays/AngleWheel";
-import { generateCaptionOptions } from "../../ai/captionGen";
 import { ingestImage } from "../../lib/image-ingest";
 import { FigmaScrubber } from "../../app/FigmaScrubber";
 import {
@@ -51,20 +60,21 @@ import {
   useEditorStore,
 } from "../../model/store";
 import type {
-  AdditionalFill,
   Align,
   AspectId,
   Background,
   ExportConfiguration,
   Layer,
-  LayerShadow,
   WatermarkPosition,
   WatermarkTone,
 } from "../../model/types";
 import { isImageLayer, isShapeLayer, isTextLayer } from "../../model/types";
 import { SlidePreview } from "./SlidePreview";
 import { readStoredValue, writeStoredValue } from "../../lib/safe-storage";
-import { exportActivePng } from "../../export/png";
+import { captureArtwork, exportArtwork, supportsSvg } from "../../export/selection";
+import type { Slide } from "../../model/types";
+import { getStudioStage, subscribeStudioStage } from "../canvas/stage-ref";
+import { FramePresets, GuideControls } from "./FrameControls";
 
 const TEXT_STYLES = [
   { id: "display", label: "Display", fontFamily: "DM Sans", fontSize: 112, fontWeight: 700, lineHeight: 1.05 },
@@ -140,7 +150,7 @@ const LayerOrderButtons = ({
   </div>
 );
 
-export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(() => void) | undefined> }) {
+export function Inspector({ onBeforeExport, onOpenAssistant }: { onBeforeExport?: () => Promise<(() => void) | undefined>; onOpenAssistant?: () => void }) {
   const slide = useEditorStore((s) => activeSlide(s));
   const project = useEditorStore((s) => s.project);
   const assets = useEditorStore((s) => s.assets);
@@ -165,12 +175,12 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
   const [flow, setFlow] = useState<"wrap" | "vertical" | "horizontal" | "grid">("grid");
   const [lockAspectRatio, setLockAspectRatio] = useState(false);
   const [constraintsOpen, setConstraintsOpen] = useState(false);
-  const [colorPicker, setColorPicker] = useState<{ kind: "fill" | "stroke"; top: number; left: number; fillId?: string } | null>(null);
+  const [colorPicker, setColorPicker] = useState<{ kind: "fill" | "stroke"; anchor: HTMLButtonElement; paintId: string; targetId: string } | null>(null);
   const [exportingConfigId, setExportingConfigId] = useState<string | null>(null);
   const [exportMessage, setExportMessage] = useState("");
   const [styleClipboard, setStyleClipboard] = useState<Partial<Layer> | null>(null);
   const [sampledImageBackground, setSampledImageBackground] = useState<{ key: string; colors: string[] } | null>(null);
-  const [pagePopover, setPagePopover] = useState<{ left: number; top: number } | null>(null);
+  const [pagePopover, setPagePopover] = useState<HTMLButtonElement | null>(null);
 
   const layer = layers.length === 1 ? layers[0] : undefined;
   const isMultiSelect = layers.length > 1;
@@ -261,6 +271,9 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
         strokeWidth: item.strokeWidth,
         strokeVisible: item.strokeVisible,
         strokeOpacity: item.strokeOpacity,
+        effects: item.effects,
+        isolated: item.isolated,
+        shadowEnabled: item.shadowEnabled,
         shadow: item.shadow,
         shadowColor: item.shadowColor,
         shadowOpacity: item.shadowOpacity,
@@ -279,6 +292,9 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
         strokeWidth: item.strokeWidth,
         strokeVisible: item.strokeVisible,
         strokeOpacity: item.strokeOpacity,
+        effects: item.effects,
+        isolated: item.isolated,
+        shadowEnabled: item.shadowEnabled,
         shadow: item.shadow,
         shadowColor: item.shadowColor,
         shadowOpacity: item.shadowOpacity,
@@ -290,12 +306,19 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
         type: "shape",
         fill: item.fill,
         fillOpacity: item.fillOpacity,
+        fillVisible: item.fillVisible,
+        fills: item.fills,
         additionalFills: item.additionalFills,
         cornerRadius: item.cornerRadius,
         stroke: item.stroke,
         strokeWidth: item.strokeWidth,
+        strokeStyle: item.strokeStyle,
+        strokes: item.strokes,
         strokeVisible: item.strokeVisible,
         strokeOpacity: item.strokeOpacity,
+        effects: item.effects,
+        isolated: item.isolated,
+        shadowEnabled: item.shadowEnabled,
         shadow: item.shadow,
         shadowColor: item.shadowColor,
         shadowOpacity: item.shadowOpacity,
@@ -319,9 +342,11 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
   const alignToPage = (axis: "x" | "y", edge: "start" | "center" | "end") => {
     const sizes = alignTargets.map((item) => (axis === "x" ? item.width : "height" in item ? item.height : item.fontSize * item.lineHeight));
     const positions = alignTargets.map((item) => item[axis]);
-    const extent = axis === "x" ? slide.width : slide.height;
-    const start = alignTargets.length > 1 ? Math.min(...positions) : 0;
-    const end = alignTargets.length > 1 ? Math.max(...positions.map((position, index) => position + sizes[index])) : extent;
+    const parent = alignTargets.length === 1 ? slide.layers.find(item => item.id === alignTargets[0].parentId && item.type === "shape" && item.isFrame) : undefined;
+    const origin = parent?.[axis] ?? 0;
+    const extent = axis === "x" ? parent?.width ?? slide.width : parent && "height" in parent ? parent.height : slide.height;
+    const start = alignTargets.length > 1 ? Math.min(...positions) : origin;
+    const end = alignTargets.length > 1 ? Math.max(...positions.map((position, index) => position + sizes[index])) : origin + extent;
     updateLayers(
       alignTargets.map((item) => {
         const size = axis === "x" ? item.width : "height" in item ? item.height : item.fontSize * item.lineHeight;
@@ -421,8 +446,8 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
     if (!layer) {
       // Resizing the slide: reposition every layer per its Horizontal /
       // Vertical constraints so the Inspector constraint controls take effect.
-      const nextWidth = axis === "width" ? next : lockAspectRatio ? Math.round(next * ratio) : slide.width;
-      const nextHeight = axis === "height" ? next : lockAspectRatio ? Math.round(next / ratio) : slide.height;
+      const nextWidth = axis === "width" ? next : lockAspectRatio ? next * ratio : slide.width;
+      const nextHeight = axis === "height" ? next : lockAspectRatio ? next / ratio : slide.height;
       resizeSlide(nextWidth, nextHeight);
       return;
     }
@@ -437,7 +462,7 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
     }
     if (lockAspectRatio) {
       updateLayer(layer.id, {
-        ...(axis === "width" ? { width: next, height: Math.round(next / ratio) } : { width: Math.round(next * ratio), height: next }),
+        ...(axis === "width" ? { width: next, height: next / ratio } : { width: next * ratio, height: next }),
         ...(slide.autoLayout ? { autoSizing: { ...layer.autoSizing, [axis]: "fixed" as const } } : {}),
       });
     } else {
@@ -477,19 +502,18 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
     updateLayers(alignTargets.map((item) => ({ id: item.id, patch: { [axis]: item[axis] + delta } })));
   };
 
-  const tidySelection = () => {
-    const sorted = [...alignTargets].sort((a, b) => a.x - b.x);
-    if (sorted.length < 2) return;
-    const left = sorted[0].x;
-    const right = sorted.at(-1)!.x + sorted.at(-1)!.width;
-    const gap = (right - left - sorted.reduce((sum, item) => sum + item.width, 0)) / (sorted.length - 1);
-    let x = left;
-    const updates = sorted.map((item) => {
-      const patch = { id: item.id, patch: { x } };
-      x += item.width + gap;
+  const distribute = (axis: "x" | "y") => {
+    const sorted = [...alignTargets].sort((a, b) => a[axis] - b[axis]);
+    if (sorted.length < 3) return;
+    const size = (item: Layer) => axis === "x" ? item.width : "height" in item ? item.height : item.fontSize * item.lineHeight;
+    const last = sorted[sorted.length - 1];
+    const gap = (last[axis] + size(last) - sorted[0][axis] - sorted.reduce((sum, item) => sum + size(item), 0)) / (sorted.length - 1);
+    let position = sorted[0][axis] + size(sorted[0]) + gap;
+    updateLayers(sorted.slice(1, -1).map(item => {
+      const patch = { id: item.id, patch: { [axis]: position } };
+      position += size(item) + gap;
       return patch;
-    });
-    updateLayers(updates);
+    }));
   };
 
   const rotations = new Set(alignTargets.map((item) => Math.round(item.rotation)));
@@ -526,181 +550,114 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
   const flipSelection = (axis: "flipX" | "flipY") =>
     updateLayers(alignTargets.map((item) => ({ id: item.id, patch: { [axis]: !item[axis] } })));
 
-  const updateShadow = (patch: Partial<LayerShadow>) => {
-    if (layers.length > 1) updateLayers(alignTargets.map((item) => ({ id: item.id, patch })));
-    else if (layer) updateLayer(layer.id, patch);
-    else updateSlide(patch);
-  };
-
-  const shadowEnabled = Boolean(layer ? (layer.shadow ?? 0) > 0 : (slide.shadow ?? 0) > 0);
-
-  const addExportConfiguration = () => {
-    if ((slide.exportSettings?.length ?? 0) >= 12) {
-      setExportMessage("Maximum 12 export presets allowed.");
-      return;
-    }
-    const next: ExportConfiguration = { id: crypto.randomUUID(), format: "image/png", scale: 1, suffix: "1x" };
-    updateSlide({ exportSettings: [...(slide.exportSettings ?? []), next] });
-    setExportMessage("");
-  };
-
-  const removeExportConfiguration = (id: string) =>
-    updateSlide({ exportSettings: (slide.exportSettings ?? []).filter((config) => config.id !== id) });
+  const exportTargetName = layer ? layerName(layer) : pageName(slide, project.slides.indexOf(slide));
+  const exportSettings = (layer ?? slide).exportSettings ?? [];
+  const setExportSettings = (next: ExportConfiguration[]) =>
+    layer ? patchLayer({ exportSettings: next }) : updateSlide({ exportSettings: next });
+  const patchExport = (id: string, patch: Partial<ExportConfiguration>) =>
+    setExportSettings(exportSettings.map(config => config.id === id ? { ...config, ...patch } : config));
 
   const runExportConfiguration = async (configuration: ExportConfiguration) => {
     setExportingConfigId(configuration.id);
     setExportMessage("");
-    let restoreCanvas: (() => void) | undefined;
+    let restore: (() => void) | undefined;
     try {
-      restoreCanvas = await onBeforeExport?.();
-      const result = await exportActivePng({ multiplier: configuration.scale, format: configuration.format, suffix: configuration.suffix });
-      setExportMessage(result.clamped ? "Clamped to safe resolution." : "Export complete.");
+      restore = await onBeforeExport?.();
+      const result = await exportArtwork(slide, layer?.id, exportTargetName, configuration);
+      setExportMessage(result.clamped ? "Exported at the closest safe resolution." : "Export complete.");
     } catch (error) {
       setExportMessage(error instanceof Error ? error.message : "Export failed.");
     } finally {
-      restoreCanvas?.();
+      restore?.();
       setExportingConfigId(null);
     }
   };
 
-  // Fill properties
-  const fillLayer = layer ?? layers.find((item) => item.type === "shape" || item.type === "text");
-  const fill = fillLayer?.type === "shape" ? fillLayer.fill : fillLayer?.type === "text" ? fillLayer.color : slide.background.kind === "solid" ? slide.background.color : "#ffffff";
-  const fillOpacity = fillLayer?.type === "shape" || fillLayer?.type === "text" ? fillLayer.fillOpacity ?? 1 : slide.background.kind === "solid" ? slide.background.opacity ?? 1 : 1;
-  const activeExtraFill = colorPicker?.fillId ? layers.find((item) => item.type === "shape" || item.type === "text")?.additionalFills?.find((item) => item.id === colorPicker.fillId) : undefined;
-  const canFillSelection = !layers.length || layers.some((item) => item.type === "shape" || item.type === "text");
-  const fillValues = layers.filter((item) => item.type === "shape" || item.type === "text").map((item) => (item.type === "shape" ? item.fill : item.color));
-  const fillIsMixed = new Set(fillValues.map((val) => val.toLowerCase())).size > 1;
-
-  const pageColors = Array.from(
-    new Set(
-      project.slides.flatMap((item) => [
-        ...project.brand.palette,
-        item.background.kind === "solid" ? item.background.color : null,
-        ...item.layers.flatMap((entry) =>
-          entry.type === "shape"
-            ? [entry.fill, entry.stroke ?? null, ...(entry.additionalFills ?? []).map((paint) => paint.color)]
-            : entry.type === "text"
-              ? [entry.color, ...(entry.additionalFills ?? []).map((paint) => paint.color)]
-              : []
-        ),
-      ]).filter((c): c is string => Boolean(c))
-    )
-  );
-
-  const setFill = (color: string) => {
-    if (layer?.type === "shape") patchLayer({ fill: color });
-    else if (layer?.type === "text") patchLayer({ color });
-    else if (layers.length > 1) {
-      const updates = layers.flatMap((item): { id: string; patch: Partial<Layer> }[] =>
-        item.type === "shape" ? [{ id: item.id, patch: { fill: color } }] : item.type === "text" ? [{ id: item.id, patch: { color } }] : []
-      );
-      updateLayers(updates);
-    } else {
-      updateSlide({ background: { kind: "solid", color, opacity: slide.background.kind === "solid" ? slide.background.opacity : undefined } });
-    }
+  const hasRadiusControl = !layer || layer.type === "shape" || layer.type === "image";
+  const target = layer ?? slide;
+  const pickerSlot = colorPicker?.kind === "stroke" ? "strokes" : "fills";
+  const activePaint = colorPicker?.targetId === target.id
+    ? paintsFor(target, pickerSlot).find(paint => paint.id === colorPicker.paintId) : undefined;
+  const patchPaints = (slot: PaintSlot, change: (paints: Paint[]) => Paint[]) => {
+    const state = useEditorStore.getState();
+    if (state.selectedSlideId !== slide.id) return;
+    const currentPage = state.project.slides.find(item => item.id === slide.id);
+    const current = layer ? currentPage?.layers.find(item => item.id === layer.id) : currentPage;
+    if (!current || ("locked" in current && current.locked)) return;
+    const paints = change(paintsFor(current, slot));
+    if (layer) state.updateLayer(layer.id, { [slot]: paints });
+    else state.updateSlide({ [slot]: paints });
   };
-
-  const setFillOpacity = (opacity: number) => {
-    const value = Math.max(0, Math.min(1, opacity));
-    if (layer?.type === "shape" || layer?.type === "text") patchLayer({ fillOpacity: value });
-    else if (layers.length > 1) updateLayers(layers.filter((item) => item.type === "shape" || item.type === "text").map((item) => ({ id: item.id, patch: { fillOpacity: value } })));
-    else updateSlide({ background: { kind: "solid", color: fill, opacity: value } });
+  const visibleColors = (item: Layer) => {
+    if (item.visible === false || item.opacity === 0) return [];
+    const fills = item.type === "shape" && (isInk(item.shape) || item.shape === "line" || item.shape === "arrow") ? [] : paintsFor(item, "fills");
+    const strokes = item.strokeWidth === 0 ? [] : paintsFor(item, "strokes");
+    return [...new Set([...fills, ...strokes].filter(paint => (!paint.kind || paint.kind === "solid") && paint.visible && paint.opacity > 0).map(paint => paint.color.toLowerCase()))];
   };
-
-  const fillTargets = layers.filter((item) => item.type === "shape" || item.type === "text");
-  const primaryFillVisible = !fillTargets.some((item) => item.fillVisible === false);
-  const togglePrimaryFill = () => {
-    const next = !primaryFillVisible;
-    updateLayers(fillTargets.map((item) => ({ id: item.id, patch: { fillVisible: next } })));
-  };
-
-  const updateAdditionalFill = (fillId: string, patch: Partial<AdditionalFill>) => {
-    const targets = layers.filter((item) => item.type === "shape" || item.type === "text");
-    updateLayers(
-      targets.map((item) => {
-        const additionalFills = item.additionalFills ?? [];
-        const current = additionalFills.find((entry) => entry.id === fillId);
-        const next = current
-          ? additionalFills.map((entry) => (entry.id === fillId ? { ...entry, ...patch } : entry))
-          : [...additionalFills, { id: fillId, color: "#FFFFFF", opacity: 1, visible: true, ...patch }];
-        return { id: item.id, patch: { additionalFills: next } };
-      })
-    );
-  };
-
-  const addAdditionalFill = (event: MouseEvent<HTMLButtonElement>) => {
-    const fillId = crypto.randomUUID();
-    const paint: AdditionalFill = { id: fillId, color: "#FFFFFF", opacity: 1, visible: true };
-    updateLayers(
-      layers
-        .filter((item) => item.type === "shape" || item.type === "text")
-        .map((item) => ({ id: item.id, patch: { additionalFills: [...(item.additionalFills ?? []), paint] } }))
-    );
-    openColorPicker("fill", event, fillId);
-  };
-
-  const removeAdditionalFill = (fillId: string) => {
-    updateLayers(
-      layers
-        .filter((item) => item.type === "shape" || item.type === "text")
-        .map((item) => ({ id: item.id, patch: { additionalFills: (item.additionalFills ?? []).filter((paint) => paint.id !== fillId) } }))
-    );
-  };
-
-  // Stroke properties
-  const strokeColor = layers.length ? layers[0].stroke : slide.stroke;
-  const strokeWidth = layers.length ? layers[0].strokeWidth ?? 1 : slide.strokeWidth ?? 1;
-  const strokeOpacity = layers.length ? layers[0].strokeOpacity ?? 1 : slide.strokeOpacity ?? 1;
-  const strokeExists = layers.length ? layers.some((item) => Boolean(item.stroke)) : Boolean(slide.stroke);
-  const hasRadiusControl = layers.length === 0 || (layer?.type === "shape" || layer?.type === "image");
-  const editableSelection = layers.filter((item) => !item.locked);
-
-  const visibleStrokeTargets = editableSelection.filter((item) => item.stroke);
-  const strokeShown = layers.length
-    ? visibleStrokeTargets.some((item) => item.strokeVisible !== false)
-    : slide.strokeVisible !== false;
-  const toggleStroke = () => {
-    const patch = { strokeVisible: !strokeShown };
-    if (layers.length) updateLayers(visibleStrokeTargets.map(({ id }) => ({ id, patch })));
-    else updateSlide(patch);
-  };
-
-  const setStrokeColor = (color: string) =>
-    layers.length ? updateLayers(editableSelection.map((item) => ({ id: item.id, patch: { stroke: color, strokeWidth: item.stroke ? item.strokeWidth ?? 1 : 1 } }))) : updateSlide({ stroke: color, strokeWidth: slide.stroke ? slide.strokeWidth ?? 1 : 1 });
-  const setStrokeOpacity = (opacity: number) =>
-    layers.length ? updateLayers(editableSelection.map((item) => ({ id: item.id, patch: { strokeOpacity: opacity } }))) : updateSlide({ strokeOpacity: opacity });
-  const setStrokeWidth = (width: number) =>
-    layers.length ? updateLayers(editableSelection.map((item) => ({ id: item.id, patch: { strokeWidth: width } }))) : updateSlide({ strokeWidth: width });
-  const clearStroke = () =>
-    layers.length ? updateLayers(editableSelection.map((item) => ({ id: item.id, patch: { stroke: undefined, strokeWidth: undefined, strokeVisible: undefined } }))) : updateSlide({ stroke: undefined, strokeWidth: undefined, strokeVisible: undefined });
-
-  const addLibraryColor = (color: string) => {
-    if (!project.brand.palette.some((entry) => entry.toLowerCase() === color.toLowerCase())) {
-      updateBrand({ palette: [...project.brand.palette, color] });
-    }
-  };
-
-  const openColorPicker = (kind: "fill" | "stroke", event: MouseEvent<HTMLButtonElement>, fillId?: string) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    setColorPicker({
-      kind,
-      fillId,
-      left: Math.max(8, rect.left - 300),
-      top: Math.max(8, Math.min(window.innerHeight - 520, rect.bottom - 28)),
-    });
-  };
-
+  const pageColors = [...new Set([
+    ...(slide.background.kind === "solid" ? [slide.background.color.toLowerCase()] : []),
+    ...slide.layers.flatMap(visibleColors),
+  ])];
+  const colorLayers = new Map<string, string[]>();
+  if (isMultiSelect) for (const item of layers) for (const color of visibleColors(item)) {
+    colorLayers.set(color, [...(colorLayers.get(color) ?? []), item.id]);
+  }
   const setBackground = (background: Background) => updateSlide({ background });
 
-  const layerAdditionalFills = (layer && "additionalFills" in layer ? (layer.additionalFills as AdditionalFill[] | undefined) : undefined) ?? [];
+  const paintSection = (kind: "fill" | "stroke") => {
+    const slot = kind === "fill" ? "fills" : "strokes";
+    const paints = paintsFor(target, slot);
+    const open = (event: MouseEvent<HTMLButtonElement>, paintId: string) => {
+      useEditorStore.setState({ paintFocus: layer ? { layerId: layer.id, paintId, slot } : undefined });
+      setColorPicker({ kind, paintId, targetId: target.id, anchor: event.currentTarget });
+    };
+    const move = (id: string, offset: number) => patchPaints(slot, current => {
+      const from = current.findIndex(item => item.id === id);
+      const to = from + offset;
+      if (from < 0 || to < 0 || to >= current.length) return current;
+      const next = [...current];
+      [next[from], next[to]] = [next[to], next[from]];
+      return next;
+    });
+    return section(kind === "fill" ? "Fill" : "Stroke",
+      <div className="grid gap-1">
+        {paints.map((paint, index) => <div key={paint.id} className="flex items-center gap-1 rounded bg-[var(--bg-surface-elevated)] p-1">
+          <button type="button" aria-label={`Edit ${kind} paint ${index + 1}`} onClick={event => open(event, paint.id)}
+            className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs" disabled={layer?.locked}>
+            <span className="size-5 shrink-0 rounded border border-[var(--border-base)]" style={{ background: paint.color, opacity: paint.opacity }} />
+            <span className="truncate">{!paint.kind || paint.kind === "solid" ? paint.color.toUpperCase() : paint.kind} · {Math.round(paint.opacity * 100)}%</span>
+          </button>
+          <button type="button" aria-label={`${paint.visible ? "Hide" : "Show"} ${kind}${paints.length > 1 ? ` paint ${index + 1}` : ""}`}
+            disabled={layer?.locked} onClick={() => patchPaints(slot, current => current.map(item => item.id === paint.id ? { ...item, visible: !item.visible } : item))}>
+            {paint.visible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
+          </button>
+          {paints.length > 1 && <>
+            <button type="button" aria-label={`Move ${kind} paint ${index + 1} earlier`} disabled={!index || layer?.locked} onClick={() => move(paint.id, -1)}>↑</button>
+            <button type="button" aria-label={`Move ${kind} paint ${index + 1} later`} disabled={index === paints.length - 1 || layer?.locked} onClick={() => move(paint.id, 1)}>↓</button>
+          </>}
+          <button type="button" aria-label={`Remove ${kind} paint ${index + 1}`} disabled={layer?.locked}
+            onClick={() => patchPaints(slot, current => current.filter(item => item.id !== paint.id))}><Trash2 className="size-3.5" /></button>
+        </div>)}
+        {kind === "stroke" && paints.length > 0 && <FigmaScrubber key={target.id} label="Stroke Width" value={target.strokeWidth ?? 1}
+          min={0} max={64} step={0.5} unit="px" disabled={layer?.locked} allowNumericEntry
+          onChange={strokeWidth => layer ? patchLayer({ strokeWidth }) : updateSlide({ strokeWidth })} />}
+        {kind === "stroke" && paints.length > 0 && layer?.type === "shape" && <VectorStrokeControls key={`stroke-style-${layer.id}`}
+          layer={layer} onChange={strokeStyle => patchLayer({ strokeStyle })} />}
+      </div>,
+      <button type="button" title={`Add ${kind}`} aria-label={`Add ${kind}`} disabled={paints.length >= 32 || layer?.locked}
+        onClick={event => {
+          const paint: Paint = { id: crypto.randomUUID(), kind: "solid", color: kind === "fill" ? "#ffffff" : "#000000", visible: true, opacity: 1 };
+          patchPaints(slot, current => [...current, paint]);
+          open(event, paint.id);
+        }}><Plus className="size-3.5" /></button>);
+  };
 
   return (
     <div className="relative flex h-full flex-col gap-6 overflow-y-auto text-[var(--text-secondary)]">
       {/* Inspector Top Selection Header */}
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-[var(--border-base)] px-3">
-        <div className="min-w-0 flex-1 truncate text-xs font-semibold capitalize text-[var(--text-main)]" aria-label="Current selection">
-          {isMultiSelect ? `${layers.length} layers selected` : layer?.type ?? "Frame"}
+        <div className="min-w-0 flex-1 truncate text-xs font-semibold" aria-label="Current selection">
+          {isMultiSelect ? `${layers.length} layers selected` : layer ? layerName(layer) : pageName(slide, project.slides.indexOf(slide))}
         </div>
         {layer && (
           <div className="flex items-center gap-1">
@@ -745,6 +702,25 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
         </button>
       </div>
 
+      {!isMultiSelect && <div className="grid gap-2 border-b border-[var(--border-base)] px-3 pb-2">
+        {layer && <nav aria-label="Selection path" className="flex flex-wrap items-center gap-1 text-[11px] text-[var(--text-secondary)]">
+          <button onClick={() => useEditorStore.getState().selectLayer(null)}>{pageName(slide, project.slides.indexOf(slide))}</button>
+          {frameAncestors(layer, new Map(slide.layers.map(item => [item.id, item]))).reverse().map(parent => <span key={parent.id}>› <button onClick={() => useEditorStore.getState().selectLayer(parent.id)}>{layerName(parent)}</button></span>)}
+          <span aria-current="location" className="truncate">› {layerName(layer)}</span>
+        </nav>}
+        {(!layer || (isShapeLayer(layer) && layer.isFrame)) && <label className="flex items-center gap-2 text-[11px]">
+          {layer ? "Frame name" : "Page name"}
+          <input key={(layer?.id ?? slide.id) + (layer?.name ?? slide.name ?? "")} maxLength={256} disabled={layer?.locked}
+            className={control + " min-w-0 flex-1"} defaultValue={layer ? layerName(layer) : pageName(slide, project.slides.indexOf(slide))}
+            onBlur={e => {
+              const original = layer ? layerName(layer) : pageName(slide, project.slides.indexOf(slide));
+              const value = e.currentTarget.value.trim() || original;
+              e.currentTarget.value = value;
+              if (value !== original) { if (layer) updateLayer(layer.id, { name: value }); else updateSlide({ name: value }); }
+            }}
+            onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); e.currentTarget.value = e.currentTarget.defaultValue; e.currentTarget.blur(); } else if (e.key === "Enter") e.currentTarget.blur(); }} />
+        </label>}
+      </div>}
       {/* ========================================================================= */}
       {/* CASE A: CANVAS / NO LAYER SELECTED */}
       {/* ========================================================================= */}
@@ -804,11 +780,7 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                 <button
                   type="button"
                   onClick={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    setPagePopover({
-                      left: Math.max(8, rect.left - 300),
-                      top: Math.max(8, Math.min(window.innerHeight - 520, rect.bottom - 28)),
-                    });
+                    setPagePopover(event.currentTarget);
                   }}
                   className="flex min-w-0 flex-1 items-center gap-2 text-left hover:bg-[var(--bg-input)] rounded px-1 py-0.5 transition"
                 >
@@ -845,19 +817,13 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                   </span>
                   <button
                     type="button"
-                    onClick={() => {
-                      if (bg.kind === "solid") {
-                        const curOpacity = bg.opacity ?? 1;
-                        setBackground({ ...bg, opacity: curOpacity === 0 ? 1 : 0 });
-                      } else if (bg.kind === "image") {
-                        setBackground({ ...bg, dim: bg.dim > 0.8 ? 0 : 0.85 });
-                      }
-                    }}
+                    onClick={() => updateSlide({ backgroundVisible: slide.backgroundVisible === false })}
+                    aria-pressed={slide.backgroundVisible !== false}
                     title="Toggle page background visibility"
                     aria-label="Toggle page background visibility"
                     className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-main)]"
                   >
-                    {(bg.kind === "solid" && (bg.opacity ?? 1) === 0) ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                    {slide.backgroundVisible === false ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
                   </button>
                 </div>
               </div>
@@ -865,11 +831,7 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
             <button
               type="button"
               onClick={(event) => {
-                const rect = event.currentTarget.getBoundingClientRect();
-                setPagePopover({
-                  left: Math.max(8, rect.left - 300),
-                  top: Math.max(8, Math.min(window.innerHeight - 520, rect.bottom - 28)),
-                });
+                setPagePopover(event.currentTarget);
               }}
               title="Add page background style"
               className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-main)]"
@@ -1019,6 +981,25 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
       {/* ========================================================================= */}
       {isMultiSelect && (
         <>
+          {colorLayers.size > 0 && section("Selection colors",
+            <div className="grid gap-1">
+              {Array.from(colorLayers, ([color, ids]) => <div key={color} className="flex items-center gap-2"><button type="button"
+                title={`Select layers using ${color}`} onClick={() => useEditorStore.getState().selectLayers(ids)}
+                className="flex h-7 flex-1 items-center gap-2 rounded px-1 text-xs hover:bg-[var(--bg-surface-elevated)]">
+                <span className="size-4 rounded border border-[var(--border-base)]" style={{ backgroundColor: color }} />
+                <span>{color.toUpperCase()}</span><span className="ml-auto text-[var(--text-muted)]">{ids.length} {ids.length === 1 ? "layer" : "layers"}</span>
+              </button>
+                <input type="color" aria-label={`Replace ${color} in selection`} value={color}
+                  onChange={event => {
+                    const replacement = event.target.value;
+                    const replace = (paints: Paint[]) => paints.map(paint =>
+                      (!paint.kind || paint.kind === "solid") && paint.visible && paint.opacity > 0 && paint.color.toLowerCase() === color ? { ...paint, color: replacement } : paint);
+                    updateLayers(layers.filter(item => ids.includes(item.id) && !item.locked).map(item => ({
+                      id: item.id, patch: { fills: replace(paintsFor(item, "fills")), strokes: replace(paintsFor(item, "strokes")) },
+                    })));
+                  }} />
+              </div>)}
+            </div>)}
           {section(
             `Alignment (${layers.length} layers)`,
             <div className="grid gap-2.5">
@@ -1036,27 +1017,16 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
-                  onClick={tidySelection}
+                  onClick={() => distribute("x")}
+                  disabled={alignTargets.length < 3}
                   className="rounded-md border border-[var(--border-base)] py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-surface-elevated)]"
                 >
                   Distribute horizontally
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    const sorted = [...alignTargets].sort((a, b) => a.y - b.y);
-                    if (sorted.length < 2) return;
-                    const top = sorted[0].y;
-                    const bottom = sorted.at(-1)!.y + ("height" in sorted.at(-1)! ? (sorted.at(-1) as any).height : 30);
-                    const gap = (bottom - top - sorted.reduce((sum, item) => sum + ("height" in item ? item.height : 30), 0)) / (sorted.length - 1);
-                    let y = top;
-                    const updates = sorted.map((item) => {
-                      const patch = { id: item.id, patch: { y } };
-                      y += ("height" in item ? item.height : 30) + gap;
-                      return patch;
-                    });
-                    updateLayers(updates);
-                  }}
+                  disabled={alignTargets.length < 3}
+                  onClick={() => distribute("y")}
                   className="rounded-md border border-[var(--border-base)] py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-surface-elevated)]"
                 >
                   Distribute vertically
@@ -1133,22 +1103,8 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                   [AlignEndVertical, () => alignToPage("y", "end"), "Align Bottom"],
                 ]}
                 disabled={!alignTargets.length}
-                className="grid grid-cols-[repeat(6,minmax(0,1fr))_auto] gap-1"
+                className="grid grid-cols-6 gap-1"
               />
-                <div className="flex h-7 items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={tidySelection}
-                    disabled={alignTargets.length < 2}
-                    title="Tidy up"
-                    aria-label="Tidy up"
-                    className="grid h-7 place-items-center rounded-md border border-[var(--border-base)] text-[var(--text-muted)] hover:text-[var(--text-main)] disabled:opacity-35"
-                  >
-                    <MoreHorizontal className="size-4" />
-                  </button>
-                 
-                </div>
-
               {/* X / Y Coordinates */}
               <div className="grid grid-cols-2 gap-2">
                 <label className="grid grid-cols-[14px_1fr] items-center gap-1 text-[9px] text-[var(--text-muted)]">
@@ -1156,7 +1112,8 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                   <input
                     className={`${control} tabular-nums`}
                     type="number"
-                    value={Math.round(layer.x)}
+                    step="any"
+                    value={layer.x}
                     onChange={(event) => patchLayer({ x: Number(event.target.value) })}
                   />
                 </label>
@@ -1165,7 +1122,8 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                   <input
                     className={`${control} tabular-nums`}
                     type="number"
-                    value={Math.round(layer.y)}
+                    step="any"
+                    value={layer.y}
                     onChange={(event) => patchLayer({ y: Number(event.target.value) })}
                   />
                 </label>
@@ -1179,7 +1137,8 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                     className={`${control} tabular-nums`}
                     type="number"
                     min={1}
-                    value={Math.round(currentWidth)}
+                    step="any"
+                    value={currentWidth}
                     onChange={(event) => setDimension("width", Number(event.target.value))}
                   />
                 </label>
@@ -1189,7 +1148,8 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                     className={`${control} tabular-nums`}
                     type="number"
                     min={1}
-                    value={Math.round(currentHeight)}
+                    step="any"
+                    value={currentHeight}
                     onChange={(event) => setDimension("height", Number(event.target.value))}
                   />
                 </label>
@@ -1214,7 +1174,8 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                     type="number"
                     min={-360}
                     max={360}
-                    value={rotationIsMixed ? "" : Math.round(layer.rotation ?? 0)}
+                    step="any"
+                    value={rotationIsMixed ? "" : layer.rotation ?? 0}
                     placeholder={rotationIsMixed ? "Mixed" : undefined}
                     onChange={(event) => setSelectionRotation(Number(event.target.value))}
                   />
@@ -1415,7 +1376,7 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
 
                   <ContrastIndicator color={layer.color} backgrounds={contrastBackgrounds} fontSize={layer.fontSize} />
                   <TextContentWarnings layer={layer} slide={slide} />
-                  <CaptionGenerator onChoose={(text) => patchLayer({ text })} />
+                  {onOpenAssistant && <Button variant="ghost" onClick={onOpenAssistant}>Rewrite selected text in Assistant</Button>}
                 </div>
               )}
             </>
@@ -1431,11 +1392,29 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                     <SelectBox value={layer.shape} onChange={shape => patchLayer({ shape: shape as typeof layer.shape })}
                       options={primitives.map(id => ({ id, label: id === "rect" ? "Rectangle" : id[0].toUpperCase() + id.slice(1) }))} />
                   </Field>}
+                  {layer.isFrame && <>
+                    <FramePresets key={layer.id} onResize={(width, height) => patchLayer({ width, height })} />
+                    <Toggle label="Clip content" checked={layer.clipContent ?? false} onCheckedChange={value => patchLayer({ clipContent: value })} />
+                  </>}
                   {layer.isFrame && <Field label="Child layout"><select value={layer.autoLayout?.flow ?? "free"} onChange={e => {
                     const flow = e.target.value;
                     patchLayer({ autoLayout: flow === "free" ? undefined : { wrap: false, gap: 8, paddingTop: 8, paddingBottom: 8, paddingLeft: 8, paddingRight: 8, alignmentX: "start", alignmentY: "start", gridColumns: 2, ...layer.autoLayout, flow: flow as "horizontal" | "vertical" | "grid" } });
                   }}><option value="free">Free position</option><option value="horizontal">Horizontal</option><option value="vertical">Vertical</option><option value="grid">Grid</option></select></Field>}
                   {layer.isFrame && layer.autoLayout && <Field label="Child gap"><input type="number" min={0} value={layer.autoLayout.gap} onChange={e => patchLayer({ autoLayout: { ...layer.autoLayout!, gap: Math.max(0, Number(e.target.value)) } })} /></Field>}
+                  {layer.isFrame && layer.autoLayout && <>
+                    <div className="grid grid-cols-2 gap-2">
+                      {(["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"] as const).map(key => {
+                        const label = "Padding " + key.slice(7).toLowerCase();
+                        return <Field key={key} label={label}><input className={control} aria-label={label} type="number" min={0}
+                          value={layer.autoLayout![key]} onChange={e => patchLayer({ autoLayout: { ...layer.autoLayout!, [key]: Math.max(0, Number(e.target.value)) } })} /></Field>;
+                      })}
+                    </div>
+                    {layer.autoLayout.flow === "grid"
+                      ? <Field label="Grid columns"><input className={control} aria-label="Grid columns" type="number" min={1} step={1}
+                          value={layer.autoLayout.gridColumns} onChange={e => patchLayer({ autoLayout: { ...layer.autoLayout!, gridColumns: Math.max(1, Math.floor(Number(e.target.value))) } })} /></Field>
+                      : <Toggle label="Wrap children" checked={layer.autoLayout.wrap}
+                          onCheckedChange={wrap => patchLayer({ autoLayout: { ...layer.autoLayout!, wrap } })} />}
+                  </>}
                   {(layer.shape === "star" || layer.shape === "polygon") && <Field label={layer.shape === "star" ? "Points" : "Sides"}><input type="number" min={3} max={60} value={layer.sides ?? (layer.shape === "star" ? 5 : 3)} onChange={e => patchLayer({ sides: Math.max(3, Math.min(60, Math.round(Number(e.target.value)))) })} /></Field>}
 
                 </div>
@@ -1524,11 +1503,19 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                     <option value="color-burn">Color burn</option>
                   </select>
                 </label>
+                {layer.type === "shape" && layer.isFrame && <label className="grid gap-1 text-[9px] text-[var(--text-muted)]">
+                  Group blending
+                  <select className={control} aria-label="Group blending" value={layer.isolated ? "isolated" : "pass-through"}
+                    onChange={event => patchLayer({ isolated: event.target.value === "isolated" })}>
+                    <option value="pass-through">Pass-through</option><option value="isolated">Isolated</option>
+                  </select>
+                </label>}
               </div>
 
-              {"opacity" in layer && (
+              {(
                 <FigmaScrubber
                   label="Layer Opacity"
+                  allowNumericEntry
                   value={Math.round((layer.opacity ?? 1) * 100)}
                   min={0}
                   max={100}
@@ -1547,195 +1534,11 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
             </button>
           )}
 
-          {/* Fill Section */}
-          {canFillSelection &&
-            section(
-              "Fill",
-              <div className="grid gap-1.5">
-                <div className="flex items-center gap-1 rounded-md bg-[var(--bg-surface-elevated)] p-1.5">
-                  <button
-                    type="button"
-                    onClick={(event) => openColorPicker("fill", event)}
-                    className="flex min-w-0 flex-1 items-center gap-2 text-left hover:bg-[var(--bg-input)]"
-                  >
-                    <span className="size-8 shrink-0 rounded-md border border-white/10" style={{ backgroundColor: fill }} />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-mono text-xs font-semibold uppercase text-[var(--text-main)]">
-                        {fillIsMixed ? "Mixed colors" : fill}
-                      </span>
-                      <span className="block text-[9px] text-[var(--text-muted)]">
-                        {Math.round(fillOpacity * 100)}% · Solid
-                      </span>
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={togglePrimaryFill}
-                    title={primaryFillVisible ? "Hide fill" : "Show fill"}
-                    className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-main)]"
-                  >
-                    {primaryFillVisible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
-                  </button>
-                </div>
+          {layer.type !== "image" && paintSection("fill")}
+          {paintSection("stroke")}
 
-                {/* Additional Fills */}
-                {layerAdditionalFills.map((paint: AdditionalFill) => (
-                  <div key={paint.id} className="flex items-center gap-2 rounded-md bg-[var(--bg-surface-elevated)] p-1.5">
-                    <button
-                      type="button"
-                      onClick={(event) => openColorPicker("fill", event, paint.id)}
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                    >
-                      <span
-                        className="size-7 shrink-0 rounded-md border border-white/10"
-                        style={{ backgroundColor: paint.visible ? paint.color : "transparent", opacity: paint.opacity }}
-                      />
-                      <span className="min-w-0">
-                        <span className="block truncate font-mono text-[10px] font-semibold uppercase">{paint.color}</span>
-                        <span className="block text-[9px] text-[var(--text-muted)]">{Math.round(paint.opacity * 100)}%</span>
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => updateAdditionalFill(paint.id, { visible: !paint.visible })}
-                      className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-main)]"
-                    >
-                      {paint.visible ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => removeAdditionalFill(paint.id)}
-                      className="rounded px-1.5 text-base leading-none text-[var(--text-muted)] hover:text-rose-500"
-                    >
-                      −
-                    </button>
-                  </div>
-                ))}
-              </div>,
-              <button
-                type="button"
-                onClick={addAdditionalFill}
-                title="Add fill"
-                className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-main)]"
-              >
-                <Plus className="size-3.5" />
-              </button>
-            )}
-
-          {/* Stroke Section */}
-          {section(
-            "Stroke",
-            strokeExists && strokeColor ? (
-              <div className="grid gap-2 rounded-lg border border-[var(--border-base)] bg-[var(--bg-surface-elevated)]/40 p-2">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={(event) => openColorPicker("stroke", event)}
-                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                  >
-                    <span className="size-7 shrink-0 rounded-md border border-white/10" style={{ backgroundColor: strokeColor }} />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-mono text-xs font-semibold uppercase text-[var(--text-main)]">
-                        {strokeColor}
-                      </span>
-                      <span className="block text-[9px] text-[var(--text-muted)]">
-                        {Math.round(strokeOpacity * 100)}%
-                      </span>
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={toggleStroke}
-                    aria-label={strokeShown ? "Hide stroke" : "Show stroke"}
-                    title={strokeShown ? "Hide stroke" : "Show stroke"}
-                    className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-main)]"
-                  >
-                    {!strokeShown ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={clearStroke}
-                    title="Remove stroke"
-                    className="rounded px-1.5 text-base leading-none text-[var(--text-muted)] hover:text-rose-500"
-                  >
-                    −
-                  </button>
-                </div>
-                <FigmaScrubber label="Stroke Width" value={strokeWidth} min={0} max={32} step={0.5} unit="px" onChange={setStrokeWidth} />
-              </div>
-            ) : (
-              <p className="text-[10px] text-[var(--text-muted)]">No stroke added</p>
-            ),
-            <button
-              type="button"
-              onClick={(event) => openColorPicker("stroke", event)}
-              title="Add stroke"
-              className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-main)]"
-            >
-              <Plus className="size-3.5" />
-            </button>
-          )}
-
-          {/* Effects Section (Drop Shadow) */}
-          {section(
-            "Effects",
-            shadowEnabled ? (
-              <div className="grid gap-2 rounded-lg border border-[var(--border-base)] bg-[var(--bg-surface-elevated)]/40 p-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-[var(--text-main)]">Drop shadow</span>
-                  <button
-                    type="button"
-                    onClick={() => updateShadow({ shadow: 0 })}
-                    className="rounded px-1.5 text-base leading-none text-[var(--text-muted)] hover:text-rose-500"
-                  >
-                    −
-                  </button>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <Field label="Offset X">
-                    <input
-                      type="number"
-                      className={`${control} tabular-nums`}
-                      value={layer?.shadowOffsetX ?? 0}
-                      onChange={(e) => updateShadow({ shadowOffsetX: Number(e.target.value) })}
-                    />
-                  </Field>
-                  <Field label="Offset Y">
-                    <input
-                      type="number"
-                      className={`${control} tabular-nums`}
-                      value={layer?.shadowOffsetY ?? 4}
-                      onChange={(e) => updateShadow({ shadowOffsetY: Number(e.target.value) })}
-                    />
-                  </Field>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <Field label={`Blur ${layer?.shadow ?? 12}px`}>
-                    <Range value={layer?.shadow ?? 12} min={0} max={64} onChange={(blur) => updateShadow({ shadow: blur })} />
-                  </Field>
-                  <Field label={`Opacity ${Math.round((layer?.shadowOpacity ?? 0.3) * 100)}%`}>
-                    <Range
-                      value={layer?.shadowOpacity ?? 0.3}
-                      min={0}
-                      max={1}
-                      step={0.01}
-                      onChange={(shadowOpacity) => updateShadow({ shadowOpacity })}
-                    />
-                  </Field>
-                </div>
-              </div>
-            ) : (
-              <p className="text-[10px] text-[var(--text-muted)]">No effects added</p>
-            ),
-            <button
-              type="button"
-              onClick={() => updateShadow({ shadow: 12, shadowOffsetX: 0, shadowOffsetY: 4, shadowOpacity: 0.3, shadowColor: "#000000" })}
-              title="Add effect"
-              className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-main)]"
-            >
-              <Plus className="size-3.5" />
-            </button>
-          )}
+          {section("Effects", <EffectControls key={layer.id} effects={effectsFor(layer)}
+            disabled={layer.locked} onChange={effects => patchLayer({ effects })} />)}
 
           {/* Prototype Link */}
           {section(
@@ -1750,7 +1553,7 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
                     .filter((item) => item.id !== slide.id)
                     .map((item) => ({
                       id: item.id,
-                      label: `Navigate to Page ${project.slides.findIndex((cand) => cand.id === item.id) + 1}`,
+                      label: `Navigate to ${pageName(item, project.slides.indexOf(item))}`,
                     })),
                 ]}
               />
@@ -1762,75 +1565,74 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
       {/* ========================================================================= */}
       {/* EXPORT SECTION (ALWAYS AT BOTTOM OF INSPECTOR) */}
       {/* ========================================================================= */}
-      {section(
+      {(!layers.length || (layer?.type === "shape" && layer.isFrame)) && section(
+        "Layout guides",
+        <GuideControls key={layer?.id ?? slide.id} guides={(layer?.type === "shape" ? layer.layoutGuides : slide.layoutGuides) ?? []}
+          onChange={layoutGuides => layer ? patchLayer({ layoutGuides }) : updateSlide({ layoutGuides })} />
+      )}
+
+      {(!layers.length || layer) && section(
         "Export",
         <div className="grid gap-3">
-          {(slide.exportSettings ?? []).map((configuration) => (
-            <div key={configuration.id} className="grid gap-2 rounded-lg border border-[var(--border-base)] bg-[var(--bg-surface-elevated)]/40 p-2">
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-xs font-semibold text-[var(--text-main)]">
-                  {configuration.scale}× {configuration.format.replace("image/", "").toUpperCase()}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => removeExportConfiguration(configuration.id)}
-                  className="rounded p-1 text-[var(--text-muted)] hover:text-rose-500"
-                >
-                  <Trash2 className="size-3" />
-                </button>
+          {exportSettings.map(configuration => (
+            <div key={configuration.id} className="grid gap-2 rounded-lg border border-[var(--border-base)] p-2">
+              <div className="grid grid-cols-[1fr_1fr_auto] gap-1">
+                <select className={control} aria-label="Export scale" value={configuration.scale}
+                  disabled={configuration.format === "image/svg+xml"}
+                  onChange={e => patchExport(configuration.id, { scale: Number(e.target.value) as ExportConfiguration["scale"], suffix: e.target.value + "x" })}>
+                  {[1, 2, 3, 4].map(scale => <option key={scale} value={scale}>{scale}×</option>)}
+                </select>
+                <select className={control} aria-label="Export format" value={configuration.format}
+                  onChange={e => patchExport(configuration.id, { format: e.target.value as ExportConfiguration["format"] })}>
+                  <option value="image/png">PNG</option><option value="image/webp">WebP</option>
+                  <option value="image/jpeg">JPEG</option>
+                  <option value="image/svg+xml" disabled={!supportsSvg(slide, layer?.id)}>SVG</option>
+                  <option value="application/pdf">PDF</option>
+                </select>
+                <button type="button" aria-label="Remove export preset" onClick={() => setExportSettings(exportSettings.filter(item => item.id !== configuration.id))}><Trash2 className="size-3.5" /></button>
               </div>
-              <button
-                type="button"
-                onClick={() => void runExportConfiguration(configuration)}
-                disabled={exportingConfigId !== null}
-                className="flex h-8 items-center justify-center gap-1.5 rounded-lg bg-[#0c8ce9] text-xs font-semibold text-white shadow-xs hover:bg-[#0b7ecf] disabled:opacity-50"
-              >
-                <Download className="size-3.5" />
-                {exportingConfigId === configuration.id ? "Exporting…" : `Export page`}
-              </button>
+              <label className="grid grid-cols-[auto_1fr] items-center gap-2 text-xs">Suffix
+                <input className={control} maxLength={32} value={configuration.suffix} onChange={e => patchExport(configuration.id, { suffix: e.target.value })} />
+              </label>
+              {(configuration.format === "image/jpeg" || configuration.format === "application/pdf") &&
+                <label className="flex items-center gap-2 text-xs">Export background
+                  <input type="color" value={configuration.background ?? "#ffffff"} onChange={e => patchExport(configuration.id, { background: e.target.value })} />
+                </label>}
+              <Button onClick={() => void runExportConfiguration(configuration)} disabled={exportingConfigId !== null || (configuration.format === "image/svg+xml" && !supportsSvg(slide, layer?.id))}>
+                <Download className="size-3.5" /> {exportingConfigId === configuration.id ? "Exporting…" : `Export ${exportTargetName}`}
+              </Button>
             </div>
           ))}
-
-          <Button variant="default" className="w-full justify-center h-8 text-xs" onClick={addExportConfiguration}>
-            <Plus className="size-3.5 mr-1" /> Add Export Preset
-          </Button>
-
-          {/* Quick Preview */}
-          <div className="rounded-xl border border-[var(--border-base)] bg-[var(--bg-app)]/50 p-2">
-            <div className="mb-1.5 text-[10px] font-medium text-[var(--text-muted)]">Page Preview</div>
-            <div className="flex h-24 items-center justify-center overflow-hidden rounded-lg border border-[var(--border-base)] bg-[var(--bg-app)]">
-              <SlidePreview slide={slide} className="size-full" style={{ aspectRatio: `${slide.width} / ${slide.height}` }} />
-            </div>
-          </div>
-          {exportMessage && <p role="status" className="text-[10px] text-sky-500">{exportMessage}</p>}
+          <Button disabled={exportSettings.length >= 12} onClick={() => {
+            const scale = ([1, 2, 3, 4] as const).find(value => !exportSettings.some(config => config.scale === value)) ?? 1;
+            setExportSettings([...exportSettings, { id: crypto.randomUUID(), format: "image/png", scale, suffix: scale + "x" }]);
+          }}><Plus className="size-3.5" /> Add Export Preset</Button>
+          <ArtworkPreview key={slide.id + (layer?.id ?? "")} slide={slide} targetId={layer?.id} name={exportTargetName}
+            assets={assets} background={exportSettings.length === 1 && ["image/jpeg", "application/pdf"].includes(exportSettings[0].format) ? exportSettings[0].background ?? "#ffffff" : undefined} />
+          {exportMessage && <p role="status" className="text-xs">{exportMessage}</p>}
         </div>
       )}
 
+      {isCanvasMode && paintSection("stroke")}
+
       {/* Floating Color Picker Popover */}
-      {colorPicker && (
-        <ColorPickerPopover
+      {colorPicker && activePaint && (
+        <ColorPickerPopover key={target.id + activePaint.id}
           kind={colorPicker.kind}
-          color={colorPicker.kind === "stroke" ? strokeColor ?? "#000000" : activeExtraFill?.color ?? fill}
-          alpha={colorPicker.kind === "stroke" ? strokeOpacity : activeExtraFill?.opacity ?? fillOpacity}
-          left={colorPicker.left}
-          top={colorPicker.top}
+          paint={activePaint}
+          anchor={colorPicker.anchor}
           colors={pageColors}
-          onAddColor={addLibraryColor}
+          projectColors={project.brand.namedColors ?? []}
+          brandColors={project.brand.palette}
+          assets={assets}
+          registerAsset={registerAsset}
+          sources={slide.layers.filter(isShapeLayer).filter(item => item.id !== layer?.id)}
+          onAddColor={(name, color) => {
+            if (!name || (project.brand.namedColors?.length ?? 0) >= 128) return;
+            updateBrand({ namedColors: [...(project.brand.namedColors ?? []), { name, color }] });
+          }}
           onClose={() => setColorPicker(null)}
-          onChange={(color) =>
-            colorPicker.kind === "stroke"
-              ? setStrokeColor(color)
-              : colorPicker.fillId
-                ? updateAdditionalFill(colorPicker.fillId, { color })
-                : setFill(color)
-          }
-          onAlphaChange={(alpha) =>
-            colorPicker.kind === "stroke"
-              ? setStrokeOpacity(alpha)
-              : colorPicker.fillId
-                ? updateAdditionalFill(colorPicker.fillId, { opacity: alpha })
-                : setFillOpacity(alpha)
-          }
+          onPatch={patch => patchPaints(pickerSlot, current => current.map(paint => paint.id === activePaint.id ? { ...paint, ...patch } : paint))}
         />
       )}
 
@@ -1839,8 +1641,7 @@ export function Inspector({ onBeforeExport }: { onBeforeExport?: () => Promise<(
         <PageBackgroundPopover
           background={bg}
           assets={assets}
-          left={pagePopover.left}
-          top={pagePopover.top}
+          anchor={pagePopover}
           pageColors={pageColors}
           onClose={() => setPagePopover(null)}
           onChange={(newBg) => setBackground(newBg)}
@@ -1971,7 +1772,7 @@ export function PrototypeInspector({ onPreview }: { onPreview: () => void }) {
       <section className="grid gap-1 px-3 py-3">
         <h2 className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">Flows</h2>
         {project.slides.map((item, index) => {
-          const title = item.layers.find(isTextLayer)?.text.trim().slice(0, 28) || `Page ${index + 1}`;
+          const title = pageName(item, index);
           return (
             <div
               key={item.id}
@@ -2005,35 +1806,72 @@ export function PrototypeInspector({ onPreview }: { onPreview: () => void }) {
   );
 }
 
-function ColorPickerPopover({
-  kind,
-  color,
-  alpha,
-  left,
-  top,
-  colors,
-  onChange,
-  onClose,
-  onAddColor,
-  onAlphaChange,
-}: {
+function useInspectorPopover(root: React.RefObject<HTMLDivElement | null>, anchor: HTMLButtonElement, onClose: () => void) {
+  const close = useRef(onClose);
+  useLayoutEffect(() => { close.current = onClose; }, [onClose]);
+  useLayoutEffect(() => {
+    const panel = root.current;
+    if (!panel) return;
+    const place = () => {
+      const rect = anchor.getBoundingClientRect();
+      panel.style.left = Math.max(8, Math.min(window.innerWidth - panel.offsetWidth - 8, rect.left - panel.offsetWidth - 8)) + "px";
+      panel.style.top = Math.max(8, Math.min(window.innerHeight - panel.offsetHeight - 8, rect.top)) + "px";
+    };
+    place();
+    panel.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+    const observer = new ResizeObserver(place);
+    observer.observe(panel);
+    const dismiss = (event: PointerEvent) => {
+      if (!panel.contains(event.target as Node) && !anchor.contains(event.target as Node)) close.current();
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      close.current();
+      anchor.focus({ preventScroll: true });
+    };
+    const listeners = new AbortController();
+    const options = { capture: true, signal: listeners.signal };
+    window.addEventListener("keydown", escape, options);
+    window.addEventListener("pointerdown", dismiss, options);
+    window.addEventListener("resize", place, options);
+    window.addEventListener("scroll", place, options);
+    return () => {
+      observer.disconnect();
+      listeners.abort();
+      if (panel.contains(document.activeElement)) anchor.focus({ preventScroll: true });
+    };
+  }, [anchor, root]);
+}
+
+function ColorPickerPopover({ kind, paint, anchor, colors, projectColors, brandColors, assets, registerAsset, sources, onClose, onAddColor, onPatch }: {
   kind: "fill" | "stroke";
-  color: string;
-  alpha: number;
-  left: number;
-  top: number;
+  paint: Paint;
+  anchor: HTMLButtonElement;
   colors: string[];
-  onChange: (color: string) => void;
+  projectColors: { name: string; color: string }[];
+  brandColors: string[];
+  assets: Record<string, AssetInfo>;
+  registerAsset: (id: string, info: AssetInfo) => void;
+  sources: ShapeLayer[];
   onClose: () => void;
-  onAddColor: (color: string) => void;
-  onAlphaChange: (alpha: number) => void;
+  onAddColor: (name: string, color: string) => void;
+  onPatch: (patch: Partial<Paint>) => void;
 }) {
+  const color = paint.color, alpha = paint.opacity;
+  const onChange = (color: string) => onPatch({ color });
+  const onAlphaChange = (opacity: number) => onPatch({ opacity });
   const root = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<"custom" | "libraries">("custom");
   const [hsl, setHsl] = useState(() => hexToHsv(color));
   const [hex, setHex] = useState(color.toUpperCase());
   const [opacity, setOpacity] = useState(Math.round(alpha * 100));
   const [librarySearch, setLibrarySearch] = useState("");
+  const [paletteSource, setPaletteSource] = useState<"page" | "project">("page");
+  const [colorName, setColorName] = useState("");
+  const [format, setFormat] = useState<ColorFormat>("HEX");
+  const [manualColor, setManualColor] = useState<string>();
 
   useEffect(() => {
     setHsl(hexToHsv(color));
@@ -2041,20 +1879,7 @@ function ColorPickerPopover({
     setOpacity(Math.round(alpha * 100));
   }, [color, alpha]);
 
-  useEffect(() => {
-    const onPointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) onClose();
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [onClose]);
+  useInspectorPopover(root, anchor, onClose);
 
   const applyHsl = (next: [number, number, number]) => {
     setHsl(next);
@@ -2064,6 +1889,7 @@ function ColorPickerPopover({
   };
 
   const selectColor = (value: string) => {
+    setManualColor(undefined);
     setHex(value.toUpperCase());
     setHsl(hexToHsv(value));
     onChange(value);
@@ -2102,15 +1928,18 @@ function ColorPickerPopover({
   };
 
   const swatches = Array.from(new Set(colors.map((val) => val.toUpperCase()))).slice(0, 24);
-  const filteredSwatches = swatches.filter((item) => item.toLowerCase().includes(librarySearch.toLowerCase()));
+  const library = paletteSource === "project"
+    ? [...projectColors, ...brandColors.filter(color => !projectColors.some(entry => entry.color.toLowerCase() === color.toLowerCase())).map(color => ({ name: color, color }))]
+    : swatches.map(color => ({ name: color, color }));
+  const filteredSwatches = library.filter(({ name, color }) => (name + " " + color).toLowerCase().includes(librarySearch.toLowerCase()));
 
-  return (
+  return createPortal(
     <div
       ref={root}
       role="dialog"
       aria-label={`${kind} color picker`}
       className="ui-popover ui-popover--left fixed z-[120] max-h-[92vh] w-[288px] overflow-y-auto rounded-2xl border border-[var(--border-base)] bg-[var(--bg-surface)] text-[var(--text-main)] shadow-2xl animate-in fade-in zoom-in-95 duration-100"
-      style={{ left, top }}
+      style={{ maxHeight: "calc(100dvh - 16px)", maxWidth: "calc(100vw - 16px)", overflowY: "auto" }}
     >
       <div className="flex items-center gap-1 border-b border-[var(--border-base)] p-2">
         <button
@@ -2135,7 +1964,7 @@ function ColorPickerPopover({
         <button
           type="button"
           onClick={() => {
-            onAddColor(hex);
+            setPaletteSource("project");
             setTab("libraries");
           }}
           aria-label="Add color to library"
@@ -2153,18 +1982,21 @@ function ColorPickerPopover({
         </button>
       </div>
 
+      {tab === "custom" && <PaintOptions paint={paint} onPatch={onPatch} assets={assets} registerAsset={registerAsset} sources={sources} />}
       {tab === "custom" ? (
         <div className="p-3">
+          {(!paint.kind || paint.kind === "solid") && <>
           <div
             role="group"
             aria-label="Saturation and brightness"
+            onPointerDownCapture={beginSliderDrag}
             tabIndex={0}
             onPointerDown={(event) => {
               event.currentTarget.setPointerCapture(event.pointerId);
-              pickSquare(event);
+              applySliderChange(() => pickSquare(event));
             }}
             onPointerMove={(event) => {
-              if (event.buttons === 1) pickSquare(event);
+              if (event.buttons === 1) applySliderChange(() => pickSquare(event));
             }}
             className="relative h-44 cursor-crosshair touch-none rounded-xl outline-none"
             style={{
@@ -2189,15 +2021,17 @@ function ColorPickerPopover({
             <input
               aria-label="Hue"
               type="range"
+              onPointerDownCapture={beginSliderDrag}
               min={0}
               max={360}
               value={hsl[0]}
-              onChange={(e) => applyHsl([Number(e.target.value), hsl[1], hsl[2]])}
+              onChange={(e) => applySliderChange(() => applyHsl([Number(e.target.value), hsl[1], hsl[2]]))}
               className="hue-range h-3 flex-1 cursor-pointer rounded-full"
               style={{ background: "linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)" }}
             />
           </div>
 
+          </>}
           <div className="mt-2 flex items-center">
             <div
               className="relative h-3 flex-1 overflow-hidden rounded-full border border-[var(--border-base)]"
@@ -2209,10 +2043,11 @@ function ColorPickerPopover({
               <input
                 aria-label={`${kind} opacity`}
                 type="range"
+              onPointerDownCapture={beginSliderDrag}
                 min={0}
                 max={100}
                 value={opacity}
-                onChange={(e) => setAlpha(Number(e.target.value))}
+                onChange={(e) => applySliderChange(() => setAlpha(Number(e.target.value)))}
                 className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
               />
             </div>
@@ -2220,15 +2055,24 @@ function ColorPickerPopover({
 
           <div className="mt-3 flex items-center gap-2">
             <div className="grid flex-1 grid-cols-[54px_1fr_1px_48px] overflow-hidden rounded-md border border-[var(--border-base)] bg-[var(--bg-input)]">
-              <span className="flex items-center justify-center border-r border-[var(--border-base)] text-[10px] text-[var(--text-muted)]">
-                HEX
-              </span>
-              <input
-                aria-label="Hex color"
-                value={hex.replace(/^#/, "")}
-                maxLength={6}
-                onChange={(e) => updateHex(e.target.value.replace(/[^\da-f]/gi, ""))}
-                className="w-full bg-transparent px-2 py-1.5 font-mono text-xs uppercase outline-none text-[var(--text-main)]"
+              <select aria-label="Color format" value={format} onChange={event => { setFormat(event.target.value as ColorFormat); setManualColor(undefined); }}>
+                {(["HEX", "RGB", "CSS", "HSL", "HSB"] as const).map(value => <option key={value}>{value}</option>)}
+              </select>
+              <input aria-label={format === "HEX" ? "Hex color" : `${format} color`}
+                value={manualColor ?? formatPaintColor(hex, format)}
+                onChange={event => {
+                  const input = event.target.value;
+                  setManualColor(input);
+                  if (format === "HEX") updateHex(input.replace(/[^\da-f]/gi, "").slice(0, 6));
+                }}
+                onBlur={() => {
+                  const parsed = manualColor && parsePaintColor(manualColor, format);
+                  if (parsed) selectColor(parsed);
+                  else setHex(color.toUpperCase());
+                  setManualColor(undefined);
+                }}
+                onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); }}
+                className="w-full bg-transparent px-2 py-1.5 font-mono text-xs outline-none text-[var(--text-main)]"
               />
               <span className="bg-[var(--border-base)]" />
               <input
@@ -2237,7 +2081,7 @@ function ColorPickerPopover({
                 min={0}
                 max={100}
                 value={opacity}
-                onChange={(e) => setAlpha(Number(e.target.value))}
+                onChange={(e) => applySliderChange(() => setAlpha(Number(e.target.value)))}
                 className="w-full bg-transparent text-center font-mono text-xs outline-none text-[var(--text-main)]"
               />
             </div>
@@ -2256,20 +2100,20 @@ function ColorPickerPopover({
               className="min-w-0 flex-1 bg-transparent text-xs text-[var(--text-main)] outline-none placeholder:text-[var(--text-muted)]"
             />
           </label>
-          <div className="mt-3 grid grid-cols-6 gap-1.5">
-            {filteredSwatches.map((swatch) => (
-              <button
-                key={swatch}
-                type="button"
-                onClick={() => {
-                  selectColor(swatch);
-                  setTab("custom");
-                }}
-                title={swatch}
-                className="size-7 rounded-md border border-white/10 shadow-xs transition hover:scale-110"
-                style={{ backgroundColor: swatch }}
-              />
-            ))}
+          <select aria-label="Palette source" className="mt-2 w-full" value={paletteSource}
+            onChange={e => setPaletteSource(e.target.value as typeof paletteSource)}>
+            <option value="page">Colors on this page</option><option value="project">Project library</option>
+          </select>
+          {paletteSource === "project" && <div className="mt-2 flex gap-1">
+            <Input aria-label="Project color name" placeholder="Name this color" value={colorName} maxLength={80} onChange={event => setColorName(event.target.value)} />
+            <Button disabled={!colorName.trim()} onClick={() => { onAddColor(colorName.trim(), color); setColorName(""); }}>Save</Button>
+          </div>}
+          <div className="mt-2 grid gap-1">
+            {filteredSwatches.map(({ name, color }, index) => <button key={color + index} type="button"
+              className="flex items-center gap-2 rounded p-1 text-xs hover:bg-[var(--bg-surface-elevated)]"
+              onClick={() => { selectColor(color); setTab("custom"); }}>
+              <span className="size-4 rounded border border-[var(--border-base)]" style={{ background: color }} />{name}
+            </button>)}
           </div>
         </div>
       )}
@@ -2289,15 +2133,14 @@ function ColorPickerPopover({
           ))}
         </div>
       </div>
-    </div>
+    </div>, document.body
   );
 }
 
 function PageBackgroundPopover({
   background,
   assets,
-  left,
-  top,
+  anchor,
   pageColors,
   onClose,
   onChange,
@@ -2306,8 +2149,7 @@ function PageBackgroundPopover({
 }: {
   background: Background;
   assets: Record<string, { url: string; name?: string }>;
-  left: number;
-  top: number;
+  anchor: HTMLButtonElement;
   pageColors: string[];
   onClose: () => void;
   onChange: (bg: Background) => void;
@@ -2318,20 +2160,7 @@ function PageBackgroundPopover({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [tab, setTab] = useState<"solid" | "gradient" | "image">(background.kind);
 
-  useEffect(() => {
-    const onPointerDown = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) onClose();
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [onClose]);
+  useInspectorPopover(root, anchor, onClose);
 
   const solidColor = background.kind === "solid" ? background.color : "#1C1917";
   const solidOpacity = background.kind === "solid" ? background.opacity ?? 1 : 1;
@@ -2339,11 +2168,12 @@ function PageBackgroundPopover({
   const imageBg = background.kind === "image" ? background : null;
   const imageUrl = imageBg ? assets[imageBg.assetId]?.url : null;
 
-  return (
+  return createPortal(
     <div
       ref={root}
+      role="dialog" aria-label="Page background"
       className="fixed z-50 w-72 rounded-xl border border-[var(--border-base)] bg-[var(--bg-surface)] p-3 text-xs shadow-2xl backdrop-blur-md"
-      style={{ left, top }}
+      style={{ maxHeight: "calc(100dvh - 16px)", maxWidth: "calc(100vw - 16px)", overflowY: "auto" }}
     >
       {/* Header with Title and Close */}
       <div className="mb-2.5 flex items-center justify-between border-b border-[var(--border-base)] pb-2">
@@ -2587,7 +2417,7 @@ function PageBackgroundPopover({
           Apply style to all pages
         </button>
       </div>
-    </div>
+    </div>, document.body
   );
 }
 
@@ -2634,71 +2464,6 @@ function mixHex(from: string, to: string, amount: number) {
   const start = parse(from);
   const end = parse(to);
   return `#${start.map((channel, index) => Math.round(channel + (end[index] - channel) * amount).toString(16).padStart(2, "0")).join("")}`;
-}
-
-function CaptionGenerator({ onChoose }: { onChoose: (text: string) => void }) {
-  const [idea, setIdea] = useState("");
-  const [apiKey, setApiKey] = useState(() => readStoredValue("cardcraft:gemini-api-key") ?? "");
-  const [options, setOptions] = useState<string[]>([]);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  return (
-    <section className="grid gap-2 rounded-xl border border-[var(--border-base)] bg-[var(--bg-surface-elevated)]/30 p-2.5">
-      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-        <Sparkles className="size-3 text-sky-500" />
-        <span>AI Headline Ideas</span>
-      </div>
-      <Input
-        type="password"
-        value={apiKey}
-        placeholder="Gemini API Key"
-        aria-label="Gemini API key"
-        onChange={(event) => {
-          setApiKey(event.target.value);
-          writeStoredValue("cardcraft:gemini-api-key", event.target.value);
-        }}
-        className="text-xs"
-      />
-      <Input
-        value={idea}
-        placeholder="Topic or brief idea…"
-        aria-label="Card idea"
-        onChange={(event) => setIdea(event.target.value)}
-        className="text-xs"
-      />
-      <button
-        type="button"
-        disabled={!apiKey.trim() || !idea.trim() || loading}
-        onClick={() => {
-          setLoading(true);
-          setError("");
-          void generateCaptionOptions(apiKey.trim(), idea.trim())
-            .then(setOptions)
-            .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not generate captions"))
-            .finally(() => setLoading(false));
-        }}
-        className="flex h-7 items-center justify-center rounded-lg bg-[#0c8ce9] text-xs font-semibold text-white shadow-xs hover:bg-[#0b7ecf] disabled:opacity-40"
-      >
-        {loading ? "Generating…" : "Generate Suggestions"}
-      </button>
-      {error && <p role="alert" className="text-[10px] text-rose-500">{error}</p>}
-      {options.length > 0 && (
-        <div className="space-y-1 pt-1">
-          {options.map((option, index) => (
-            <button
-              key={`${index}-${option}`}
-              type="button"
-              onClick={() => onChoose(option)}
-              className="block w-full rounded-md border border-[var(--border-base)] p-1.5 text-left text-xs text-[var(--text-secondary)] transition hover:border-sky-500 hover:bg-sky-500/5 hover:text-[var(--text-main)]"
-            >
-              {option}
-            </button>
-          ))}
-        </div>
-      )}
-    </section>
-  );
 }
 
 function ContrastIndicator({ color, backgrounds, fontSize }: { color: string; backgrounds: string[] | null; fontSize: number }) {
@@ -2757,4 +2522,71 @@ function TextContentWarnings({ layer, slide }: { layer: Extract<Layer, { type: "
       Text extends beyond canvas boundaries.
     </div>
   );
+}
+
+function ArtworkPreview({ slide, targetId, name, assets, background }: {
+  slide: Slide;
+  targetId?: string;
+  name: string;
+  assets: unknown;
+  background?: string;
+}) {
+  const stage = useSyncExternalStore(subscribeStudioStage, getStudioStage);
+  const [image, setImage] = useState<string>();
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        setImage(captureArtwork(slide, targetId, 1, true).canvas.toDataURL());
+      } catch {
+        setImage(undefined);
+      }
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [slide, targetId, assets, stage]);
+  return <figure className="grid gap-1">
+    <figcaption className="text-xs">{name} preview</figcaption>
+    <div className="flex min-h-24 justify-center overflow-hidden rounded border border-[var(--border-base)]"
+      style={{ background: "repeating-conic-gradient(#ddd 0% 25%, #f6f6f6 0% 50%) 0 / 16px 16px" }}>
+      {image ? <img src={image} alt={`${name} export preview`} className="max-h-40 max-w-full self-center object-contain" style={{ background }} />
+        : targetId ? <p className="self-center rounded bg-[var(--bg-surface)] p-2 text-xs">Open the page editor to preview this selection.</p>
+        : <SlidePreview slide={slide} className="w-full" style={{ aspectRatio: `${slide.width} / ${slide.height}` }} />}
+    </div>
+  </figure>;
+}
+
+type ColorFormat = "HEX" | "RGB" | "CSS" | "HSL" | "HSB";
+
+function formatPaintColor(hex: string, format: ColorFormat) {
+  const raw = hex.replace(/^#/, "");
+  const value = raw.length === 3 ? raw.split("").map(char => char + char).join("") : raw;
+  const [h, s, v] = hexToHsv(hex);
+  if (format === "HEX") return value;
+  if (format === "RGB") return [0, 2, 4].map(index => parseInt(value.slice(index, index + 2), 16)).join(", ");
+  if (format === "HSB") return [h, s * 100, v * 100].map(Math.round).join(", ");
+  if (format === "HSL") {
+    const light = v * (1 - s / 2);
+    const saturation = light === 0 || light === 1 ? 0 : (v - light) / Math.min(light, 1 - light);
+    return [h, saturation * 100, light * 100].map(Math.round).join(", ");
+  }
+  return hex;
+}
+
+function parsePaintColor(input: string, format: ColorFormat) {
+  if (format === "HEX") {
+    const raw = input.replace(/^#/, "");
+    const hex = raw.length === 3 ? raw.split("").map(char => char + char).join("") : raw;
+    return /^[0-9a-f]{6}$/i.test(hex) ? "#" + hex : undefined;
+  }
+  const parts = input.split(/[\s,%]+/).filter(Boolean).map(Number);
+  if (format !== "CSS" && (parts.length !== 3 || parts.some(value => !Number.isFinite(value)))) return;
+  if (format === "HSB") return hsvToHex((parts[0] % 360 + 360) % 360, Math.min(100, Math.max(0, parts[1])) / 100, Math.min(100, Math.max(0, parts[2])) / 100);
+  const css = format === "RGB" ? `rgb(${parts.join(" ")})` : format === "HSL" ? `hsl(${parts[0]} ${parts[1]}% ${parts[2]}%)` : input;
+  if (!CSS.supports("color", css)) return;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 1;
+  const ctx = canvas.getContext("2d")!;
+  const opaque = `rgb(from ${css} r g b / 1)`;
+  ctx.fillStyle = CSS.supports("color", opaque) ? opaque : css;
+  ctx.fillRect(0, 0, 1, 1);
+  return "#" + Array.from(ctx.getImageData(0, 0, 1, 1).data.slice(0, 3), value => value.toString(16).padStart(2, "0")).join("");
 }

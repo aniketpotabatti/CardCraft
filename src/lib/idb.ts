@@ -32,6 +32,10 @@ export function projectAssetIds(project: Project): string[] {
   const ids = new Set<string>();
   for (const slide of project.slides) {
     if (slide.background.kind === "image") ids.add(slide.background.assetId);
+    for (const owner of [slide, ...slide.layers]) for (const paint of [...(owner.fills ?? []), ...(owner.strokes ?? [])]) {
+      if (paint.assetId) ids.add(paint.assetId);
+      if (paint.posterId) ids.add(paint.posterId);
+    }
     for (const layer of slide.layers) if (layer.type === "image") {
       ids.add(layer.assetId);
       if (layer.videoAssetId) ids.add(layer.videoAssetId);

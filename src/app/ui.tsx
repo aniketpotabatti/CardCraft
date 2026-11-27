@@ -1,10 +1,11 @@
+import { beginSliderDrag, applySliderChange } from "../model/slider-history";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Label from "@radix-ui/react-label";
 import * as Select from "@radix-ui/react-select";
 import * as Slider from "@radix-ui/react-slider";
 import * as Switch from "@radix-ui/react-switch";
 import { Check, ChevronDown } from "lucide-react";
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, Ref, SelectHTMLAttributes } from "react";
+import type { ButtonHTMLAttributes, ComponentProps, ReactNode, Ref, SelectHTMLAttributes } from "react";
 import { cn } from "../lib/cn";
 
 export function Button({
@@ -38,7 +39,7 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   );
 }
 
-export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
+export function Input(props: ComponentProps<"input">) {
   return (
     <input
       {...props}
@@ -75,6 +76,7 @@ export function Toggle({
     <div className="flex items-center justify-between gap-3">
       {label && <Label.Root className="text-sm text-[var(--text-main)]">{label}</Label.Root>}
       <Switch.Root
+        aria-label={label}
         checked={checked}
         onCheckedChange={onCheckedChange}
         className="relative h-5 w-9 rounded-full bg-white/10 data-[state=checked]:bg-[var(--border-focus)]"
@@ -100,12 +102,13 @@ export function Range({
 }) {
   return (
     <Slider.Root
+          onPointerDownCapture={beginSliderDrag}
       className="relative flex h-8 w-full items-center"
       value={[value]}
       min={min}
       max={max}
       step={step}
-      onValueChange={([next]) => onChange(next)}
+      onValueChange={([next]) => applySliderChange(() => onChange(next))}
     >
       <Slider.Track className="relative h-1.5 grow rounded-full bg-[var(--border-strong)]">
         <Slider.Range className="absolute h-full rounded-full bg-[var(--border-focus)]" />

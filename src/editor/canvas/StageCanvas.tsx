@@ -1,6 +1,12 @@
+import { bindEffectGroup } from "./effect-rendering";
+import type { Paint, ShapeLayer } from "../../model/types";
+import { gradientAxis, paintScene, shapePatternSource } from "./paint-rendering";
+import { usePaintMedia } from "./use-paint-media";
+import { paintsFor, type PaintSlot } from "../../model/paints";
+import { hasShadow } from "../../model/types";
 import { DrawingSurface, type StrokeStyle } from "./DrawingSurface";
 import { isDrawingTool, vectorPath } from "../../model/drawing";
-import { frameAncestors, orderedLayers } from "../../model/frames";
+import { frameAncestors, frameClipPath, isFrame, orderedLayers } from "../../model/frames";
 import type Konva from "konva";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Group, Image as KonvaImage, Layer, Line, Path, Rect, Ellipse, Stage, Text, Transformer } from "react-konva";
@@ -88,6 +94,9 @@ export function StageCanvas({ stroke }: { stroke: StrokeStyle }) {
     const byId = new Map(layers.map(layer => [layer.id, layer]));
     return orderedLayers(layers).filter(layer => !frameAncestors(layer, byId).some(parent => parent.visible === false));
   }, [slide?.layers]);
+  const layersById = useMemo(() => new Map(renderLayers.map(layer => [layer.id, layer])), [renderLayers]);
+  const brushPreview = useEditorStore(s => s.brushPreview);
+  const paintFocus = useEditorStore(s => s.paintFocus);
   const selectedLayerIds = useEditorStore((s) => s.selectedLayerIds);
   const selectedIds = useMemo(() => new Set(selectedLayerIds), [selectedLayerIds]);
   const selectedLayers = useMemo(
@@ -97,6 +106,7 @@ export function StageCanvas({ stroke }: { stroke: StrokeStyle }) {
   const cleanView = useEditorStore((s) => s.cleanView);
   const exporting = useEditorStore((s) => s.exporting);
   const assets = useEditorStore((s) => s.assets);
+  const paintMedia = usePaintMedia(slide, assets, cleanView && !exporting, () => stageRef.current?.batchDraw());
   const resolvedTone = useEditorStore((s) => s.resolvedTone);
   const selectLayer = useEditorStore((s) => s.selectLayer);
   const selectSlide = useEditorStore((s) => s.selectSlide);
@@ -389,7 +399,14 @@ export function StageCanvas({ stroke }: { stroke: StrokeStyle }) {
     setEditingId(id);
   };
 
-  const selectCanvasLayer = (id: string, shift = false) => {
+  const selectCanvasLayer = (hitId: string, shift = false, deep = false) => {
+    const byId = new Map(slide?.layers.map(item => [item.id, item]));
+    const hit = byId.get(hitId);
+    if (!hit || hit.locked) return;
+    const parents = frameAncestors(hit, byId).reverse();
+    if (parents.some(parent => parent.locked)) return;
+    const id = deep || selectedIds.has(hitId) ? hitId : parents.find(parent => selectedIds.has(parent.id))?.id ?? parents[0]?.id ?? hitId;
+    if (deep) { if (shift) toggleLayer(id); else selectLayer(id); return; }
     if (shift) {
       toggleLayer(id);
       return;
@@ -400,11 +417,23 @@ export function StageCanvas({ stroke }: { stroke: StrokeStyle }) {
     else selectLayer(id);
   };
 
-  const selectOrFollowPrototypeLink = (id: string, shift = false) => {
+  const selectOrFollowPrototypeLink = (id: string, shift = false, deep = false) => {
     const targetSlideId = slide?.layers.find((layer) => layer.id === id)?.prototypeTargetSlideId;
-    if (cleanView && targetSlideId) { selectSlide(targetSlideId); return; }
-    selectCanvasLayer(id, shift);
+    if (hideUi) { if (cleanView && targetSlideId) selectSlide(targetSlideId); return; }
+    selectCanvasLayer(id, shift, deep);
   };
+
+  function enterChild(id: string) {
+    if (!slide || hideUi) return false;
+    const byId = new Map(slide.layers.map(layer => [layer.id, layer]));
+    const hit = byId.get(id);
+    if (!hit) return false;
+    const path = [...frameAncestors(hit, byId).reverse(), hit];
+    const index = path.findIndex(item => useEditorStore.getState().selectedLayerIds.includes(item.id));
+    if (index < 0 || index === path.length - 1) return false;
+    selectLayer(path[index + 1].id);
+    return true;
+  }
 
   const contextImage = contextMenu?.target === "layer"
     ? slide?.layers.find((layer) => layer.id === contextMenu.ids[0] && isImageLayer(layer))
@@ -438,9 +467,282 @@ export function StageCanvas({ stroke }: { stroke: StrokeStyle }) {
   const safeBounds = safeGuideBounds(safeGuidePreset, slide.width, slide.height);
   const wmBox = watermarkBox(slide.width, slide.height, slide.watermark.size, slide.watermark.position);
 
+  const patternSource = (id: string) => {
+    const layer = layersById.get(id);
+    if (!layer || !isShapeLayer(layer) || layer.visible === false) return;
+    return shapePatternSource(layer, paintsFor(layer, "fills"), paintsFor(layer, "strokes"), paintMedia);
+  };
+
+  const selectedShape = selectedLayers.length === 1 && isShapeLayer(selectedLayers[0]) ? selectedLayers[0] : undefined;
+  const gradients = selectedShape ? (["fills", "strokes"] as const).flatMap(slot =>
+    paintsFor(selectedShape, slot).filter(paint => paint.kind === "gradient" && paint.gradient && paint.visible).map(paint => ({ paint, slot }))
+  ) : [];
+  const activeGradient = (paintFocus?.layerId === selectedShape?.id
+    ? gradients.find(item => item.slot === paintFocus?.slot && item.paint.id === paintFocus?.paintId) : undefined) ?? gradients[0];
+  const renderArtwork = (layer: CanvasLayer) => {
+    const blend = layer.isolated || layer.effects?.some(effect => effect.visible && !effect.legacy) ? undefined : layer.blendMode;
+    const height = "height" in layer ? layer.height : layer.fontSize * layer.lineHeight;
+    const centered = isShapeLayer(layer) && layer.shape === "ellipse";
+    const area = { x: centered ? -layer.width / 2 : 0, y: centered ? -height / 2 : 0, width: layer.width, height };
+    const fills = paintsFor(layer, "fills"), strokes = paintsFor(layer, "strokes");
+    const topStroke = strokes.findLast(paint => paint.visible);
+    const strokeColor = topStroke ? withAlpha(topStroke.color, topStroke.opacity) : undefined;
+    const strokeWidth = layer.strokeWidth ?? (strokes.length ? 1 : 0);
+    const vector = isShapeLayer(layer) && layer.strokeStyle
+      ? { layer, preview: !hideUi && brushPreview?.layerId === layer.id ? brushPreview.brush : undefined }
+      : undefined;
+    const sceneFunc = layer.fills || layer.strokes || vector ? paintScene(fills, strokes, area, paintMedia, patternSource, vector) : undefined;
+
+    const path = isShapeLayer(layer) ? vectorPath(layer) : undefined;
+    const ShapeNode = path ? Path : Rect;
+    if (isShapeLayer(layer)) return (
+      <Fragment key={layer.id}>
+        {(sceneFunc ? [] : layer.additionalFills ?? []).filter((paint) => paint.visible).map((paint) => (
+      layer.shape === "ellipse" ? (
+        <Ellipse
+          key={`${layer.id}-fill-${paint.id}`}
+          x={layer.x + layer.width / 2}
+          y={layer.y + layer.height / 2}
+          radiusX={Math.abs(layer.width) / 2}
+          radiusY={Math.abs(layer.height) / 2}
+          scaleX={layer.flipX ? -1 : 1}
+          scaleY={layer.flipY ? -1 : 1}
+          rotation={layer.rotation}
+          fill={withAlpha(paint.color, paint.opacity)}
+          opacity={layer.opacity ?? 1}
+          globalCompositeOperation={blend ?? "source-over"}
+          listening={false}
+        />
+      ) : (
+        <ShapeNode data={path ?? ""} key={`${layer.id}-fill-${paint.id}`} x={layer.x + (layer.flipX ? layer.width : 0)} y={layer.y + (layer.flipY ? layer.height : 0)} scaleX={layer.flipX ? -1 : 1} scaleY={layer.flipY ? -1 : 1} width={layer.width} height={layer.height} rotation={layer.rotation} fill={withAlpha(paint.color, paint.opacity)} cornerRadius={layer.cornerRadius} opacity={layer.opacity ?? 1} globalCompositeOperation={blend ?? "source-over"} listening={false} />
+      )
+        ))}
+        {layer.shape === "ellipse" ? (
+      <Ellipse
+        key={layer.id}
+        id={layer.id}
+        x={layer.x + layer.width / 2}
+        y={layer.y + layer.height / 2}
+        radiusX={Math.abs(layer.width) / 2}
+        radiusY={Math.abs(layer.height) / 2}
+        scaleX={layer.flipX ? -1 : 1}
+        scaleY={layer.flipY ? -1 : 1}
+        rotation={layer.rotation}
+        fill={sceneFunc ? "transparent" : withAlpha(layer.fill, layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1)}
+        opacity={layer.opacity ?? 1}
+        globalCompositeOperation={blend ?? "source-over"}
+        stroke={strokeColor}
+        sceneFunc={sceneFunc}
+        perfectDrawEnabled={!vector}
+        strokeWidth={strokeWidth}
+        shadowColor={layer.shadowColor ?? "#000000"}
+        shadowBlur={layer.shadow ?? 0}
+        shadowOpacity={hasShadow(layer) ? layer.shadowOpacity ?? 0.32 : 0}
+        shadowOffsetX={layer.shadowOffsetX ?? 0}
+        shadowOffsetY={layer.shadowOffsetY ?? (layer.shadow ? layer.shadow * 0.35 : 0)}
+        draggable={!hideUi && !layer.locked && !slide.autoLayout}
+        onClick={(event) => {
+          event.cancelBubble = true;
+          selectOrFollowPrototypeLink(layer.id, event.evt.shiftKey, event.evt.ctrlKey || event.evt.metaKey);
+          setEditingId(null);
+        }}
+        onDblClick={() => enterChild(layer.id)}
+        onDblTap={() => enterChild(layer.id)}
+        onTap={() => {
+          selectOrFollowPrototypeLink(layer.id);
+          setEditingId(null);
+        }}
+        onDragStart={() => onLayerDragStart(layer.id)}
+        onDragMove={(event) => onLayerDragMove(event.target, layer.id)}
+        onDragEnd={() => onLayerDragEnd()}
+        onMouseEnter={() => setCanvasCursor(getLayerCursor(layer))}
+        onMouseLeave={() => setCanvasCursor("default")}
+        ref={(node: Konva.Node | null) => {
+          boundNodes.current[layer.id] = node;
+          if (selectedIds.has(layer.id) && node) selectedNode.current = node;
+        }}
+      />
+    ) : (
+      <ShapeNode data={path ?? ""} lineCap="round" lineJoin="round" hitStrokeWidth={Math.max(10, layer.strokeWidth ?? 0)}
+        key={layer.id}
+        id={layer.id}
+        x={layer.x + (layer.flipX ? layer.width : 0)}
+        y={layer.y + (layer.flipY ? layer.height : 0)}
+        scaleX={layer.flipX ? -1 : 1}
+        scaleY={layer.flipY ? -1 : 1}
+        width={layer.width}
+        height={layer.height}
+        rotation={layer.rotation}
+        fill={sceneFunc ? "transparent" : withAlpha(layer.fill, layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1)}
+        cornerRadius={layer.cornerRadius}
+        opacity={layer.opacity ?? 1}
+        globalCompositeOperation={blend ?? "source-over"}
+        stroke={strokeColor}
+        sceneFunc={sceneFunc}
+        perfectDrawEnabled={!vector}
+        strokeWidth={strokeWidth}
+        shadowColor={layer.shadowColor ?? "#000000"}
+        shadowBlur={layer.shadow ?? 0}
+        shadowOpacity={hasShadow(layer) ? layer.shadowOpacity ?? 0.32 : 0}
+        shadowOffsetX={layer.shadowOffsetX ?? 0}
+        shadowOffsetY={layer.shadowOffsetY ?? (layer.shadow ? layer.shadow * 0.35 : 0)}
+        draggable={!hideUi && !layer.locked && !slide.autoLayout}
+        onClick={(event) => {
+          event.cancelBubble = true;
+          selectOrFollowPrototypeLink(layer.id, event.evt.shiftKey, event.evt.ctrlKey || event.evt.metaKey);
+          setEditingId(null);
+        }}
+        onDblClick={() => enterChild(layer.id)}
+        onDblTap={() => enterChild(layer.id)}
+        onTap={() => {
+          selectOrFollowPrototypeLink(layer.id);
+          setEditingId(null);
+        }}
+        onDragStart={() => onLayerDragStart(layer.id)}
+        onDragMove={(event) => onLayerDragMove(event.target, layer.id)}
+        onDragEnd={() => onLayerDragEnd()}
+        onMouseEnter={() => setCanvasCursor(getLayerCursor(layer))}
+        onMouseLeave={() => setCanvasCursor("default")}
+        ref={(node: Konva.Node | null) => {
+          boundNodes.current[layer.id] = node;
+          if (selectedIds.has(layer.id) && node) selectedNode.current = node;
+        }}
+      />
+        )}
+      </Fragment>
+    );
+    if (isImageLayer(layer)) return (
+      <Fragment key={layer.id}>
+    <SlottedImage
+      key={layer.id}
+      layer={layer}
+      url={assets[layer.assetId]?.url}
+      videoUrl={cleanView && !exporting && layer.videoAssetId ? assets[layer.videoAssetId]?.url : undefined}
+      hideUi={hideUi}
+      blend={blend}
+      selected={selectedIds.has(layer.id)}
+      scale={scale}
+      onSelect={(event) => {
+        selectOrFollowPrototypeLink(layer.id, event?.evt?.shiftKey, event?.evt?.ctrlKey || event?.evt?.metaKey);
+        setEditingId(null);
+      }}
+      onCrop={(crop) => updateLayer(layer.id, { crop })}
+      onUseAsBackground={() => { if (!hideUi && !layer.locked && !enterChild(layer.id)) setImageAsBackground(layer.id); }}
+      bindNode={(node) => {
+        boundNodes.current[layer.id] = node;
+      }}
+      draggable={!hideUi && !layer.locked && !slide.autoLayout}
+      onDragStart={() => onLayerDragStart(layer.id)}
+      onDragMove={(node) => onLayerDragMove(node, layer.id)}
+      onDragEnd={() => onLayerDragEnd()}
+      onMouseEnter={() => setCanvasCursor(getLayerCursor(layer))}
+      onMouseLeave={() => setCanvasCursor("default")}
+    />
+        {topStroke && strokeWidth > 0 && (
+    <Rect key={`${layer.id}-stroke`} x={layer.x + (layer.flipX ? layer.width : 0)} y={layer.y + (layer.flipY ? layer.height : 0)} scaleX={layer.flipX ? -1 : 1} scaleY={layer.flipY ? -1 : 1} width={layer.width} height={layer.height} rotation={layer.rotation} cornerRadius={layer.cornerRadius} fillEnabled={false} stroke={strokeColor} strokeWidth={strokeWidth} sceneFunc={layer.strokes ? paintScene([], strokes, area, paintMedia, patternSource) : undefined} listening={false} />
+        )}
+      </Fragment>
+    );
+    return editingId === layer.id ? null : (
+      <Group key={layer.id} globalCompositeOperation={blend ?? "source-over"}>
+      {(sceneFunc ? [] : layer.additionalFills ?? []).filter((paint) => paint.visible).map((paint) => (
+        <Text key={`${layer.id}-fill-${paint.id}`} x={layer.x + (layer.flipX ? layer.width : 0)} y={layer.y + (layer.flipY ? layer.fontSize * layer.lineHeight : 0)} scaleX={layer.flipX ? -1 : 1} scaleY={layer.flipY ? -1 : 1} width={layer.width} text={layer.uppercase ? layer.text.toUpperCase() : layer.text} fontFamily={layer.fontFamily} fontSize={layer.fontSize} fontStyle={`${layer.italic ? "italic " : ""}${layer.fontWeight}`} lineHeight={layer.lineHeight} letterSpacing={layer.letterSpacing} align={layer.align} fill={withAlpha(paint.color, paint.opacity)} opacity={layer.opacity} listening={false} />
+      ))}
+      <Text
+        id={layer.id}
+        x={layer.x + (layer.flipX ? layer.width : 0)}
+        y={layer.y + (layer.flipY ? layer.fontSize * layer.lineHeight : 0)}
+        scaleX={layer.flipX ? -1 : 1}
+        scaleY={layer.flipY ? -1 : 1}
+        width={layer.width}
+        text={layer.uppercase ? layer.text.toUpperCase() : layer.text}
+        fontFamily={layer.fontFamily}
+        fontSize={layer.fontSize}
+        fontStyle={`${layer.italic ? "italic " : ""}${layer.fontWeight}`}
+        lineHeight={layer.lineHeight}
+        letterSpacing={layer.letterSpacing}
+        align={layer.align}
+        fill={withAlpha(layer.color, layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1)}
+        stroke={strokeColor}
+        sceneFunc={sceneFunc}
+        strokeWidth={strokeWidth}
+        opacity={layer.opacity}
+        shadowColor={layer.shadowColor ?? "#000000"}
+        shadowBlur={layer.shadow ?? 0}
+        shadowOpacity={hasShadow(layer) ? layer.shadowOpacity ?? 0.32 : 0}
+        shadowOffsetX={layer.shadowOffsetX ?? 0}
+        shadowOffsetY={layer.shadowOffsetY ?? (layer.shadow ? layer.shadow * 0.35 : 0)}
+        rotation={layer.rotation}
+      draggable={!hideUi && !layer.locked && !slide.autoLayout}
+        ref={(node: Konva.Node | null) => {
+          boundNodes.current[layer.id] = node;
+          if (selectedIds.has(layer.id) && node) selectedNode.current = node;
+        }}
+        onClick={(event) => {
+          event.cancelBubble = true;
+          selectOrFollowPrototypeLink(layer.id, event.evt.shiftKey, event.evt.ctrlKey || event.evt.metaKey);
+          setEditingId(null);
+        }}
+        onTap={() => {
+          selectOrFollowPrototypeLink(layer.id);
+          setEditingId(null);
+        }}
+        onDblClick={() => { if (!enterChild(layer.id) && !hideUi && !layer.locked) setEditingId(layer.id); }}
+        onDblTap={() => { if (!enterChild(layer.id) && !hideUi && !layer.locked) setEditingId(layer.id); }}
+        onDragStart={() => onLayerDragStart(layer.id)}
+        onDragMove={(event) => onLayerDragMove(event.target, layer.id)}
+        onDragEnd={() => onLayerDragEnd()}
+        onMouseEnter={() => setCanvasCursor(getLayerCursor(layer))}
+        onMouseLeave={() => setCanvasCursor("default")}
+      />
+      </Group>
+    );
+  };
+
+  const renderTree = () => {
+    const children = new Map<string | undefined, CanvasLayer[]>();
+    for (const layer of renderLayers) {
+      if (layer.visible === false) continue;
+      const parent = layer.parentId && layersById.has(layer.parentId) ? layer.parentId : undefined;
+      const siblings = children.get(parent);
+      if (siblings) siblings.push(layer);
+      else children.set(parent, [layer]);
+    }
+    const visited = new Set<string>();
+    function render(layer: CanvasLayer): ReactNode {
+      if (visited.has(layer.id)) return null;
+      visited.add(layer.id);
+      const frame = isFrame(layer) ? layer : undefined;
+      const effects = layer.effects ?? [];
+      const filtered = effects.some(effect => effect.visible && !effect.legacy);
+      const clips = frameAncestors(layer, layersById).filter(parent => parent.clipContent);
+      const clip = (content: ReactNode) => clips.reduceRight<ReactNode>((child, parent) =>
+        <Group key={layer.id} name="artwork-clip" clipFunc={() => [frameClipPath(parent)]}>{child}</Group>, content);
+      const artwork = <Group key={layer.id} name="artwork-layer" exportLayerId={layer.id}
+        ref={frame ? undefined : node => bindEffectGroup(node, { effects, blend: layer.blendMode })}>
+        {renderArtwork(layer)}
+      </Group>;
+      if (!frame) return clip(artwork);
+      return clip(<Group key={layer.id} name="frame-stack" frameOwner={layer.id}
+        isolated={Boolean(frame.isolated && !filtered)}
+        globalCompositeOperation={frame.isolated && !filtered ? frame.blendMode : undefined}
+        ref={node => bindEffectGroup(node, { effects, blend: frame.blendMode, frame })}>
+        {artwork}
+        {(children.get(layer.id) ?? []).map(render)}
+      </Group>);
+    }
+    return [...(children.get(undefined) ?? []).map(render), ...renderLayers.filter(layer => layer.visible !== false && !visited.has(layer.id)).map(render)];
+  };
+
   return (
     <div
       ref={wrapRef}
+      aria-label="Canvas workspace"
+      onPointerDown={event => {
+        if (event.target === event.currentTarget && event.button === 0 && !isSpaceDown && !hideUi) {
+          selectLayer(null); setEditingId(null);
+        }
+      }}
       className={`relative h-full w-full overflow-hidden transition-colors ${
         isSpaceDown ? "cursor-grab active:cursor-grabbing" : ""
       } ${
@@ -500,13 +802,14 @@ export function StageCanvas({ stroke }: { stroke: StrokeStyle }) {
         style={{ left: offset.x, top: offset.y, width: stageW, height: stageH }}
       >
         <Stage
+          name={slide.id}
           ref={stageRef}
           width={stageW}
           height={stageH}
           scaleX={scale}
           scaleY={scale}
-          onMouseDown={(event) => {
-            if (event.target === event.target.getStage()) {
+          onPointerDown={(event) => {
+            if (!hideUi && !isSpaceDown && event.evt.button === 0 && (event.target === event.target.getStage() || event.target.findAncestor(".page-background", true))) {
               selectLayer(null);
               setEditingId(null);
             }
@@ -515,8 +818,9 @@ export function StageCanvas({ stroke }: { stroke: StrokeStyle }) {
           onContextMenu={onContextMenu}
         >
           <Layer>
-            {(slide.shadow ?? 0) > 0 && <Rect x={0} y={0} width={slide.width} height={slide.height} cornerRadius={slide.cornerRadius} fill={bg.kind === "solid" ? bg.color : bg.kind === "gradient" ? bg.from : "#27272a"} shadowColor={slide.shadowColor ?? "#000000"} shadowBlur={slide.shadow} shadowOpacity={slide.shadowOpacity ?? 0.32} shadowOffsetX={slide.shadowOffsetX ?? 0} shadowOffsetY={slide.shadowOffsetY ?? (slide.shadow ?? 0) * 0.35} listening={false} />}
+            {slide.backgroundVisible !== false && hasShadow(slide) && <Rect x={0} y={0} width={slide.width} height={slide.height} cornerRadius={slide.cornerRadius} fill={bg.kind === "solid" ? bg.color : bg.kind === "gradient" ? bg.from : "#27272a"} shadowColor={slide.shadowColor ?? "#000000"} shadowBlur={slide.shadow} shadowOpacity={slide.shadowOpacity ?? 0.32} shadowOffsetX={slide.shadowOffsetX ?? 0} shadowOffsetY={slide.shadowOffsetY ?? (slide.shadow ?? 0) * 0.35} listening={false} />}
             <Group id="bg-layers" clipX={slide.clipContent === false ? undefined : 0} clipY={slide.clipContent === false ? undefined : 0} clipWidth={slide.clipContent === false ? undefined : slide.width} clipHeight={slide.clipContent === false ? undefined : slide.height}>
+              <Group name="page-background" visible={slide.backgroundVisible !== false}>
               {bg.kind === "solid" && (
                 <Rect
                   width={slide.width}
@@ -544,208 +848,16 @@ export function StageCanvas({ stroke }: { stroke: StrokeStyle }) {
               {bg.kind === "image" && (
                 <BackgroundImage slide={slide} url={assets[bg.assetId]?.url} scale={scale} onCrop={(crop) => updateSlide({ background: { ...bg, crop } })} />
               )}
-              {renderLayers.map((layer) => {
-                if (layer.visible === false) return null;
-                const path = isShapeLayer(layer) ? vectorPath(layer) : undefined;
-                const ShapeNode = path ? Path : Rect;
-                if (isShapeLayer(layer)) return (
-                  <Fragment key={layer.id}>
-                    {(layer.additionalFills ?? []).filter((paint) => paint.visible).map((paint) => (
-                  layer.shape === "ellipse" ? (
-                    <Ellipse
-                      key={`${layer.id}-fill-${paint.id}`}
-                      x={layer.x + layer.width / 2}
-                      y={layer.y + layer.height / 2}
-                      radiusX={Math.abs(layer.width) / 2}
-                      radiusY={Math.abs(layer.height) / 2}
-                      scaleX={layer.flipX ? -1 : 1}
-                      scaleY={layer.flipY ? -1 : 1}
-                      rotation={layer.rotation}
-                      fill={withAlpha(paint.color, paint.opacity)}
-                      opacity={layer.opacity ?? 1}
-                      globalCompositeOperation={layer.blendMode ?? "source-over"}
-                      listening={false}
-                    />
-                  ) : (
-                    <ShapeNode data={path ?? ""} key={`${layer.id}-fill-${paint.id}`} x={layer.x + (layer.flipX ? layer.width : 0)} y={layer.y + (layer.flipY ? layer.height : 0)} scaleX={layer.flipX ? -1 : 1} scaleY={layer.flipY ? -1 : 1} width={layer.width} height={layer.height} rotation={layer.rotation} fill={withAlpha(paint.color, paint.opacity)} cornerRadius={layer.cornerRadius} opacity={layer.opacity ?? 1} globalCompositeOperation={layer.blendMode ?? "source-over"} listening={false} />
-                  )
-                    ))}
-                    {layer.shape === "ellipse" ? (
-                  <Ellipse
-                    key={layer.id}
-                    id={layer.id}
-                    x={layer.x + layer.width / 2}
-                    y={layer.y + layer.height / 2}
-                    radiusX={Math.abs(layer.width) / 2}
-                    radiusY={Math.abs(layer.height) / 2}
-                    scaleX={layer.flipX ? -1 : 1}
-                    scaleY={layer.flipY ? -1 : 1}
-                    rotation={layer.rotation}
-                    fill={withAlpha(layer.fill, layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1)}
-                    opacity={layer.opacity ?? 1}
-                    globalCompositeOperation={layer.blendMode ?? "source-over"}
-                    stroke={layer.strokeVisible !== false && layer.stroke ? withAlpha(layer.stroke, layer.strokeOpacity ?? 1) : undefined}
-                    strokeWidth={layer.strokeWidth ?? 0}
-                    shadowColor={layer.shadowColor ?? "#000000"}
-                    shadowBlur={layer.shadow ?? 0}
-                    shadowOpacity={layer.shadow ? layer.shadowOpacity ?? 0.32 : 0}
-                    shadowOffsetX={layer.shadowOffsetX ?? 0}
-                    shadowOffsetY={layer.shadowOffsetY ?? (layer.shadow ? layer.shadow * 0.35 : 0)}
-                    draggable={!hideUi && !layer.locked && !slide.autoLayout}
-                    onClick={(event) => {
-                      event.cancelBubble = true;
-                      selectOrFollowPrototypeLink(layer.id, event.evt.shiftKey);
-                      setEditingId(null);
-                    }}
-                    onTap={() => {
-                      selectOrFollowPrototypeLink(layer.id);
-                      setEditingId(null);
-                    }}
-                    onDragStart={() => onLayerDragStart(layer.id)}
-                    onDragMove={(event) => onLayerDragMove(event.target, layer.id)}
-                    onDragEnd={() => onLayerDragEnd()}
-                    onMouseEnter={() => setCanvasCursor(getLayerCursor(layer))}
-                    onMouseLeave={() => setCanvasCursor("default")}
-                    ref={(node: Konva.Node | null) => {
-                      boundNodes.current[layer.id] = node;
-                      if (selectedIds.has(layer.id) && node) selectedNode.current = node;
-                    }}
-                  />
-                ) : (
-                  <ShapeNode data={path ?? ""} lineCap="round" lineJoin="round" hitStrokeWidth={Math.max(10, layer.strokeWidth ?? 0)}
-                    key={layer.id}
-                    id={layer.id}
-                    x={layer.x + (layer.flipX ? layer.width : 0)}
-                    y={layer.y + (layer.flipY ? layer.height : 0)}
-                    scaleX={layer.flipX ? -1 : 1}
-                    scaleY={layer.flipY ? -1 : 1}
-                    width={layer.width}
-                    height={layer.height}
-                    rotation={layer.rotation}
-                    fill={withAlpha(layer.fill, layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1)}
-                    cornerRadius={layer.cornerRadius}
-                    opacity={layer.opacity ?? 1}
-                    globalCompositeOperation={layer.blendMode ?? "source-over"}
-                    stroke={layer.strokeVisible !== false && layer.stroke ? withAlpha(layer.stroke, layer.strokeOpacity ?? 1) : undefined}
-                    strokeWidth={layer.strokeWidth ?? 0}
-                    shadowColor={layer.shadowColor ?? "#000000"}
-                    shadowBlur={layer.shadow ?? 0}
-                    shadowOpacity={layer.shadow ? layer.shadowOpacity ?? 0.32 : 0}
-                    shadowOffsetX={layer.shadowOffsetX ?? 0}
-                    shadowOffsetY={layer.shadowOffsetY ?? (layer.shadow ? layer.shadow * 0.35 : 0)}
-                    draggable={!hideUi && !layer.locked && !slide.autoLayout}
-                    onClick={(event) => {
-                      event.cancelBubble = true;
-                      selectOrFollowPrototypeLink(layer.id, event.evt.shiftKey);
-                      setEditingId(null);
-                    }}
-                    onTap={() => {
-                      selectOrFollowPrototypeLink(layer.id);
-                      setEditingId(null);
-                    }}
-                    onDragStart={() => onLayerDragStart(layer.id)}
-                    onDragMove={(event) => onLayerDragMove(event.target, layer.id)}
-                    onDragEnd={() => onLayerDragEnd()}
-                    onMouseEnter={() => setCanvasCursor(getLayerCursor(layer))}
-                    onMouseLeave={() => setCanvasCursor("default")}
-                    ref={(node: Konva.Node | null) => {
-                      boundNodes.current[layer.id] = node;
-                      if (selectedIds.has(layer.id) && node) selectedNode.current = node;
-                    }}
-                  />
-                    )}
-                  </Fragment>
-                );
-                if (isImageLayer(layer)) return (
-                  <Fragment key={layer.id}>
-                <SlottedImage
-                  key={layer.id}
-                  layer={layer}
-                  url={assets[layer.assetId]?.url}
-                  videoUrl={cleanView && !exporting && layer.videoAssetId ? assets[layer.videoAssetId]?.url : undefined}
-                  hideUi={hideUi}
-                  selected={selectedIds.has(layer.id)}
-                  scale={scale}
-                  onSelect={(event) => {
-                    selectOrFollowPrototypeLink(layer.id, event?.evt?.shiftKey);
-                    setEditingId(null);
-                  }}
-                  onCrop={(crop) => updateLayer(layer.id, { crop })}
-                  onUseAsBackground={() => setImageAsBackground(layer.id)}
-                  bindNode={(node) => {
-                    boundNodes.current[layer.id] = node;
-                  }}
-                  draggable={!hideUi && !layer.locked && !slide.autoLayout}
-                  onDragStart={() => onLayerDragStart(layer.id)}
-                  onDragMove={(node) => onLayerDragMove(node, layer.id)}
-                  onDragEnd={() => onLayerDragEnd()}
-                  onMouseEnter={() => setCanvasCursor(getLayerCursor(layer))}
-                  onMouseLeave={() => setCanvasCursor("default")}
-                />
-                    {layer.strokeVisible !== false && layer.stroke && (layer.strokeWidth ?? 0) > 0 && (
-                <Rect key={`${layer.id}-stroke`} x={layer.x + (layer.flipX ? layer.width : 0)} y={layer.y + (layer.flipY ? layer.height : 0)} scaleX={layer.flipX ? -1 : 1} scaleY={layer.flipY ? -1 : 1} width={layer.width} height={layer.height} rotation={layer.rotation} cornerRadius={layer.cornerRadius} fillEnabled={false} stroke={withAlpha(layer.stroke!, layer.strokeOpacity ?? 1)} strokeWidth={layer.strokeWidth} listening={false} />
-                    )}
-                  </Fragment>
-                );
-                return editingId === layer.id ? null : (
-                  <Group key={layer.id} globalCompositeOperation={layer.blendMode ?? "source-over"}>
-                  {(layer.additionalFills ?? []).filter((paint) => paint.visible).map((paint) => (
-                    <Text key={`${layer.id}-fill-${paint.id}`} x={layer.x + (layer.flipX ? layer.width : 0)} y={layer.y + (layer.flipY ? layer.fontSize * layer.lineHeight : 0)} scaleX={layer.flipX ? -1 : 1} scaleY={layer.flipY ? -1 : 1} width={layer.width} text={layer.uppercase ? layer.text.toUpperCase() : layer.text} fontFamily={layer.fontFamily} fontSize={layer.fontSize} fontStyle={`${layer.italic ? "italic " : ""}${layer.fontWeight}`} lineHeight={layer.lineHeight} letterSpacing={layer.letterSpacing} align={layer.align} fill={withAlpha(paint.color, paint.opacity)} opacity={layer.opacity} listening={false} />
-                  ))}
-                  <Text
-                    id={layer.id}
-                    x={layer.x + (layer.flipX ? layer.width : 0)}
-                    y={layer.y + (layer.flipY ? layer.fontSize * layer.lineHeight : 0)}
-                    scaleX={layer.flipX ? -1 : 1}
-                    scaleY={layer.flipY ? -1 : 1}
-                    width={layer.width}
-                    text={layer.uppercase ? layer.text.toUpperCase() : layer.text}
-                    fontFamily={layer.fontFamily}
-                    fontSize={layer.fontSize}
-                    fontStyle={`${layer.italic ? "italic " : ""}${layer.fontWeight}`}
-                    lineHeight={layer.lineHeight}
-                    letterSpacing={layer.letterSpacing}
-                    align={layer.align}
-                    fill={withAlpha(layer.color, layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1)}
-                    stroke={layer.strokeVisible !== false && layer.stroke ? withAlpha(layer.stroke, layer.strokeOpacity ?? 1) : undefined}
-                    strokeWidth={layer.strokeWidth ?? 0}
-                    opacity={layer.opacity}
-                    shadowColor={layer.shadowColor ?? "#000000"}
-                    shadowBlur={layer.shadow ?? 0}
-                    shadowOpacity={layer.shadow ? layer.shadowOpacity ?? 0.32 : 0}
-                    shadowOffsetX={layer.shadowOffsetX ?? 0}
-                    shadowOffsetY={layer.shadowOffsetY ?? (layer.shadow ? layer.shadow * 0.35 : 0)}
-                    rotation={layer.rotation}
-                  draggable={!hideUi && !layer.locked && !slide.autoLayout}
-                    ref={(node: Konva.Node | null) => {
-                      boundNodes.current[layer.id] = node;
-                      if (selectedIds.has(layer.id) && node) selectedNode.current = node;
-                    }}
-                    onClick={(event) => {
-                      event.cancelBubble = true;
-                      selectOrFollowPrototypeLink(layer.id, event.evt.shiftKey);
-                      setEditingId(null);
-                    }}
-                    onTap={() => {
-                      selectOrFollowPrototypeLink(layer.id);
-                      setEditingId(null);
-                    }}
-                    onDblClick={() => { if (!hideUi && !layer.locked) setEditingId(layer.id); }}
-                    onDblTap={() => { if (!hideUi && !layer.locked) setEditingId(layer.id); }}
-                    onDragStart={() => onLayerDragStart(layer.id)}
-                    onDragMove={(event) => onLayerDragMove(event.target, layer.id)}
-                    onDragEnd={() => onLayerDragEnd()}
-                    onMouseEnter={() => setCanvasCursor(getLayerCursor(layer))}
-                    onMouseLeave={() => setCanvasCursor("default")}
-                  />
-                  </Group>
-                );
-              })}
+              </Group>
+              {renderTree()}
+
+
               {!hideUi && !editingId && !slide.layers.some((layer) => isTextLayer(layer) && layer.visible !== false && layer.text.trim()) && (
                 <Text
                   x={slide.padding}
                   y={slide.height * 0.42}
                   width={slide.width - slide.padding * 2}
+                  name="editor-overlay"
                   text="Click to add your text"
                   fontFamily={project.brand.defaultFont}
                   fontSize={36}
@@ -772,40 +884,52 @@ export function StageCanvas({ stroke }: { stroke: StrokeStyle }) {
                 listening={false}
               />
             )}
-            {slide.strokeVisible !== false && slide.stroke && (slide.strokeWidth ?? 0) > 0 && <Rect x={slide.strokeWidth! / 2} y={slide.strokeWidth! / 2} width={Math.max(0, slide.width - slide.strokeWidth!)} height={Math.max(0, slide.height - slide.strokeWidth!)} cornerRadius={slide.cornerRadius} fillEnabled={false} stroke={withAlpha(slide.stroke, slide.strokeOpacity ?? 1)} strokeWidth={slide.strokeWidth} listening={false} />}
+            {paintsFor(slide, "strokes").some(paint => paint.visible) && (slide.strokeWidth ?? 1) > 0 && (() => {
+              const width = slide.strokeWidth ?? 1;
+              const area = { x: 0, y: 0, width: Math.max(1, slide.width - width), height: Math.max(1, slide.height - width) };
+              return <Rect x={width / 2} y={width / 2} width={area.width} height={area.height}
+                cornerRadius={slide.cornerRadius} fillEnabled={false} stroke={slide.stroke ?? "#000000"} strokeWidth={width}
+                sceneFunc={paintScene([], paintsFor(slide, "strokes"), area, paintMedia, patternSource)} listening={false} />;
+            })()}
+            {!hideUi && selectedLayers.length === 1 && isShapeLayer(selectedLayers[0]) && activeGradient && (
+              <GradientHandles layer={selectedLayers[0]} scale={scale} paint={activeGradient.paint} slot={activeGradient.slot} />
+            )}
             {!hideUi && guides.x != null && (
-              <Line points={[guides.x, 0, guides.x, slide.height]} stroke="#6ea8fe" strokeWidth={1 / scale} dash={[6, 4]} />
+              <Line name="editor-overlay" points={[guides.x, 0, guides.x, slide.height]} stroke="#6ea8fe" strokeWidth={1 / scale} dash={[6, 4]} />
             )}
             {!hideUi && guides.y != null && (
               <Line points={[0, guides.y, slide.width, guides.y]} stroke="#6ea8fe" strokeWidth={1 / scale} dash={[6, 4]} />
             )}
-            {!hideUi && (slide.layoutGuides ?? []).filter((guide) => guide.visible).map((guide) => {
+            {!hideUi && [slide, ...renderLayers.filter(isFrame).filter(frame => frame.visible !== false)].flatMap(target => (target.layoutGuides ?? []).map(guide => ({target, guide}))).filter(({ guide }) => guide.visible).map(({ target, guide }) => {
               const elements = [] as ReactNode[];
               const color = guide.color;
               if (guide.type === "grid") {
                 const step = Math.max(1, guide.size);
-                for (let x = 0; x <= slide.width && x / step <= 200; x += step) elements.push(<Line key={`x-${x}`} points={[x, 0, x, slide.height]} stroke={color} opacity={guide.opacity} strokeWidth={1 / scale} />);
-                for (let y = 0; y <= slide.height && y / step <= 200; y += step) elements.push(<Line key={`y-${y}`} points={[0, y, slide.width, y]} stroke={color} opacity={guide.opacity} strokeWidth={1 / scale} />);
+                for (let x = 0; x <= target.width && x / step <= 200; x += step) elements.push(<Line key={`x-${x}`} points={[x, 0, x, target.height]} stroke={color} opacity={guide.opacity} strokeWidth={1 / scale} />);
+                for (let y = 0; y <= target.height && y / step <= 200; y += step) elements.push(<Line key={`y-${y}`} points={[0, y, target.width, y]} stroke={color} opacity={guide.opacity} strokeWidth={1 / scale} />);
               } else {
                 const horizontal = guide.type === "columns";
-                const extent = horizontal ? slide.width : slide.height;
+                const extent = horizontal ? target.width : target.height;
                 const count = Math.max(1, Math.min(100, Math.round(guide.count)));
                 const totalGutter = guide.gutter * (count - 1);
                 const track = Math.max(0, (extent - guide.margin * 2 - totalGutter) / count);
                 for (let index = 0; index < count; index += 1) {
                   const start = guide.margin + index * (track + guide.gutter);
                   elements.push(<Rect key={index} x={horizontal ? start : 0} y={horizontal ? 0 : start}
-                    width={horizontal ? track : slide.width} height={horizontal ? slide.height : track}
+                    width={horizontal ? track : target.width} height={horizontal ? target.height : track}
                     fill={color} opacity={guide.opacity} />);
                 }
               }
-              return <Group key={guide.id} listening={false}>{elements}</Group>;
+              return <Group key={target.id + guide.id} name="layout-guide" listening={false} {...("x" in target ? { x: target.x + (target.flipX ? target.width : 0), y: target.y + (target.flipY ? target.height : 0), rotation: target.rotation, scaleX: target.flipX ? -1 : 1, scaleY: target.flipY ? -1 : 1 } : {})}>{elements}</Group>;
             })}
             {!hideUi && showSafeGuides && (
-              <Group listening={false}>
+              <Group name="editor-overlay" listening={false}>
                 <Rect x={safeBounds.x} y={safeBounds.y} width={safeBounds.width} height={safeBounds.height} stroke="#34d399" strokeWidth={2 / scale} dash={[12 / scale, 8 / scale]} />
                 <Text x={safeBounds.x} y={safeBounds.y - 30 / scale} text={safeBounds.label.toUpperCase()} fontSize={18 / scale} fontFamily="Inter" fill="#34d399" />
               </Group>
+            )}
+            {!hideUi && selectedLayers.length === 1 && isShapeLayer(selectedLayers[0]) && selectedLayers[0].visible !== false && (
+              <VectorSelection layer={selectedLayers[0]} scale={scale} />
             )}
             {!hideUi && (
               <Transformer
@@ -934,6 +1058,7 @@ function SlottedImage({
   videoUrl, layer,
   url,
   hideUi,
+  blend,
   selected,
   scale,
   onSelect,
@@ -951,6 +1076,7 @@ function SlottedImage({
   videoUrl?: string;
   url?: string;
   hideUi: boolean;
+  blend?: ImageLayer["blendMode"];
   selected: boolean;
   scale: number;
   onSelect: (event?: Konva.KonvaEventObject<any>) => void;
@@ -970,7 +1096,7 @@ function SlottedImage({
   useEffect(() => {
     if (!videoUrl) return;
     const video = document.createElement("video");
-    video.loop = true; video.muted = true; video.playsInline = true;
+    video.preload = "auto"; video.loop = true; video.muted = true; video.playsInline = true;
     let raf = 0, active = true;
     const redraw = () => { videoNode.current?.getLayer()?.batchDraw(); raf = requestAnimationFrame(redraw); };
     video.onloadeddata = () => {
@@ -1005,10 +1131,10 @@ function SlottedImage({
       }}
       shadowColor={layer.shadowColor ?? "#000000"}
       shadowBlur={layer.shadow ?? 0}
-      shadowOpacity={layer.shadow ? layer.shadowOpacity ?? 0.32 : 0}
+      shadowOpacity={hasShadow(layer) ? layer.shadowOpacity ?? 0.32 : 0}
       shadowOffsetX={layer.shadowOffsetX ?? 0}
       shadowOffsetY={layer.shadowOffsetY ?? (layer.shadow ? layer.shadow * 0.35 : 0)}
-      globalCompositeOperation={layer.blendMode ?? "source-over"}
+      globalCompositeOperation={blend ?? "source-over"}
     >
       <Rect
         width={layer.width}
@@ -1131,3 +1257,75 @@ function withAlpha(color: string, alpha: number): string {
   return `rgba(${parseInt(red, 16)}, ${parseInt(green, 16)}, ${parseInt(blue, 16)}, ${Math.max(0, Math.min(1, alpha))})`;
 }
 
+
+function VectorSelection({ layer, scale }: { layer: ShapeLayer; scale: number }) {
+  const overlay = useRef<Konva.Group>(null);
+  const badge = useRef<Konva.Group>(null);
+  const data = vectorPath(layer);
+  useEffect(() => {
+    const group = overlay.current;
+    const label = badge.current;
+    const node = group?.getStage()?.findOne("#" + layer.id);
+    if (!node || !group || !label) return;
+    const sync = () => {
+      group.setAttrs({ x: node.x(), y: node.y(), rotation: node.rotation(), scaleX: node.scaleX(), scaleY: node.scaleY() });
+      const bounds = node.getClientRect({ relativeTo: group.getLayer()!, skipShadow: true });
+      const stage = group.getStage()!;
+      label.position({
+        x: Math.max(0, Math.min(stage.width() / scale - label.width() / scale, bounds.x + bounds.width / 2 - label.width() / (2 * scale))),
+        y: Math.max(0, Math.min((stage.height() - 19) / scale, bounds.y + bounds.height + 6 / scale)),
+      });
+    };
+    sync();
+    node.on("dragmove.vectorSelection transform.vectorSelection", sync);
+    return () => { node.off(".vectorSelection"); };
+  }, [layer, scale, data]);
+  if (!data) return null;
+  const dimensions = [layer.width, layer.height].map(value => Number(value.toFixed(2))).join(" × ");
+  const width = dimensions.length * 7 + 12;
+  return <>
+    <Group ref={overlay} listening={false} name="vector-centerline">
+      <Path data={data} stroke="white" strokeWidth={3} strokeScaleEnabled={false} />
+      <Path data={data} stroke="#1475d1" strokeWidth={1.5} strokeScaleEnabled={false} />
+    </Group>
+    <Group ref={badge} listening={false} name="vector-dimensions" width={width} scaleX={1 / scale} scaleY={1 / scale}>
+      <Rect width={width} height={18} fill="#1267ad" cornerRadius={3} />
+      <Text text={dimensions} width={width} height={18} align="center" verticalAlign="middle" fill="white" fontSize={11} />
+    </Group>
+  </>;
+}
+
+function GradientHandles({ layer, paint, slot, scale }: { layer: ShapeLayer; paint: Paint; slot: PaintSlot; scale: number }) {
+  const gradient = paint.gradient!;
+  const cx = layer.width * gradient.x, cy = layer.height * gradient.y;
+  const { dx, dy } = gradientAxis(gradient, layer.width, layer.height);
+  const centerOrigin = layer.shape === "ellipse";
+  const offsetX = centerOrigin ? layer.width / 2 : 0;
+  const offsetY = centerOrigin ? layer.height / 2 : 0;
+  const patch = (changes: Partial<typeof gradient>) => {
+    useEditorStore.getState().updateLayer(layer.id, {
+      [slot]: paintsFor(layer, slot).map(item => item.id === paint.id ? { ...item, gradient: { ...gradient, ...changes } } : item),
+    });
+  };
+  const marker = { fill: "#fff", stroke: "#1475d1", strokeWidth: 2 / scale, draggable: true };
+  return <Group name="editor-overlay" x={layer.x + (centerOrigin ? offsetX : layer.flipX ? layer.width : 0)}
+    y={layer.y + (centerOrigin ? offsetY : layer.flipY ? layer.height : 0)} rotation={layer.rotation}
+    scaleX={layer.flipX ? -1 : 1} scaleY={layer.flipY ? -1 : 1} offsetX={offsetX} offsetY={offsetY}>
+    <Line points={[cx - dx, cy - dy, cx + dx, cy + dy]} stroke="#1475d1" strokeWidth={2 / scale} listening={false} />
+    <Ellipse {...marker} name="gradient-center" x={cx} y={cy} radiusX={6 / scale} radiusY={6 / scale}
+      onClick={event => { event.cancelBubble = true; }}
+      onDragEnd={event => {
+        const x = Math.max(0, Math.min(1, event.target.x() / layer.width));
+        const y = Math.max(0, Math.min(1, event.target.y() / layer.height));
+        event.target.position({ x: x * layer.width, y: y * layer.height });
+        patch({ x, y });
+      }} />
+    <Ellipse {...marker} name="gradient-angle" x={cx + dx} y={cy + dy} radiusX={6 / scale} radiusY={6 / scale}
+      onClick={event => { event.cancelBubble = true; }}
+      onDragEnd={event => {
+        const x = event.target.x() - cx, y = event.target.y() - cy;
+        patch({ angle: Math.atan2(y, x) * 180 / Math.PI,
+          size: Math.max(0.01, Math.min(8, Math.hypot(x, y) * 2 / Math.hypot(layer.width, layer.height))) });
+      }} />
+  </Group>;
+}

@@ -1,3 +1,4 @@
+import { beginSliderDrag, applySliderChange } from "../../model/slider-history";
 import { useRef } from "react";
 
 export function AngleWheel({ angle, onChange }: { angle: number; onChange: (angle: number) => void }) {
@@ -7,7 +8,7 @@ export function AngleWheel({ angle, onChange }: { angle: number; onChange: (angl
     if (!box) return;
     const x = clientX - (box.left + box.width / 2);
     const y = clientY - (box.top + box.height / 2);
-    onChange((Math.round((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360);
+    applySliderChange(() => onChange((Math.round((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360));
   };
   const radians = (angle * Math.PI) / 180;
   const px = 32 + Math.cos(radians) * 22;
@@ -24,6 +25,7 @@ export function AngleWheel({ angle, onChange }: { angle: number; onChange: (angl
         aria-valuemax={359}
         aria-valuenow={angle}
         tabIndex={0}
+        onPointerDownCapture={beginSliderDrag}
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
           update(event.clientX, event.clientY);

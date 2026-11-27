@@ -4,7 +4,7 @@ export const primitives = ["rect", "line", "arrow", "ellipse", "polygon", "star"
 export type Primitive = typeof primitives[number];
 export type Ink = "pen" | "brush" | "pencil";
 export type DrawingTool = Primitive | Ink;
-export type Point = { x: number; y: number };
+export type Point = { x: number; y: number; handleX?: number; handleY?: number };
 export const isInk = (tool: string): tool is Ink => ["pen", "brush", "pencil"].includes(tool);
 export const isDrawingTool = (tool: string): tool is DrawingTool => isInk(tool) || primitives.some(shape => shape === tool);
 export const isOutline = (shape: string) => shape === "line" || shape === "arrow" || isInk(shape);
@@ -27,13 +27,13 @@ export function drawingBounds(tool: DrawingTool, samples: Point[], constrain = f
   let x = Infinity, y = Infinity, right = -Infinity, bottom = -Infinity;
   for (const p of points) { x = Math.min(x, p.x); y = Math.min(y, p.y); right = Math.max(right, p.x); bottom = Math.max(bottom, p.y); }
   const width = Math.max(1, right - x), height = Math.max(1, bottom - y);
-  return { x, y, width, height, points: isOutline(tool) ? points.map(p => ({ x: (p.x - x) / width, y: (p.y - y) / height })) : undefined };
+  return { x, y, width, height, points: isOutline(tool) ? points.map(p => ({ x: (p.x - x) / width, y: (p.y - y) / height, ...(p.handleX !== undefined ? { handleX: p.handleX / width, handleY: (p.handleY ?? 0) / height } : {}) })) : undefined };
 }
 
 export function vectorPath(layer: Pick<ShapeLayer, "shape" | "width" | "height" | "points" | "strokeWidth" | "sides">) {
   const { width, height, shape } = layer;
   if (shape === "rect" || shape === "ellipse") return undefined;
-  let points = (layer.points ?? []).map(p => ({ x: p.x * width, y: p.y * height }));
+  let points: Point[] = (layer.points ?? []).map(p => ({ x: p.x * width, y: p.y * height, handleX: (p.handleX ?? 0) * width, handleY: (p.handleY ?? 0) * height }));
   if (shape === "star" || shape === "polygon") {
     const sides = layer.sides ?? (shape === "star" ? 5 : 3);
     const count = shape === "star" ? sides * 2 : sides;
@@ -48,6 +48,12 @@ export function vectorPath(layer: Pick<ShapeLayer, "shape" | "width" | "height" 
   let path = "M" + pair(points[0]);
   points.slice(1).forEach((p, i) => {
     const next = points[i + 2];
+    const previous = points[i];
+    if (shape === "pen" && (previous.handleX || previous.handleY || p.handleX || p.handleY)) {
+      path += " C" + pair({ x: previous.x + (previous.handleX ?? 0), y: previous.y + (previous.handleY ?? 0) }) + " " +
+        pair({ x: p.x - (p.handleX ?? 0), y: p.y - (p.handleY ?? 0) }) + " " + pair(p);
+      return;
+    }
     path += (shape === "brush" || shape === "pencil") && next
       ? " Q" + pair(p) + " " + pair({ x: (p.x + next.x) / 2, y: (p.y + next.y) / 2 })
       : " L" + pair(p);

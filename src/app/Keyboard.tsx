@@ -16,6 +16,17 @@ export function Keyboard({ beforeExport }: { beforeExport?: () => Promise<(() =>
         useEditorStore.getState().setActiveTool("move");
         return;
       }
+      if (!typing && event.key === "Escape" && !document.querySelector('[role="menu"]')) {
+        useEditorStore.getState().selectLayer(null);
+        return;
+      }
+      if (!typing && event.key === "Enter" && useEditorStore.getState().activeTool === "move" && !target?.closest("button,a,[role=menu]")) {
+        const state = useEditorStore.getState();
+        const [layer] = activeLayers(state);
+        const layers = state.project.slides.find(slide => slide.id === state.selectedSlideId)?.layers ?? [];
+        const id = event.shiftKey ? layer?.parentId : layer && layers.find(child => child.parentId === layer.id && child.visible !== false && !child.locked)?.id;
+        if (id) { event.preventDefault(); state.selectLayer(id); }
+      }
       if (useEditorStore.getState().activeTool === "comments") return;
       if (!typing && matchesShortcut(event, "undo")) {
         event.preventDefault();

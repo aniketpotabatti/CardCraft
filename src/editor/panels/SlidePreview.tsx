@@ -1,8 +1,10 @@
+import { hasShadow } from "../../model/types";
 import { vectorPath } from "../../model/drawing";
-import { frameAncestors, orderedLayers } from "../../model/frames";
+import { frameAncestors, frameTransform, isFrame, orderedLayers } from "../../model/frames";
 import type { CSSProperties, ReactNode } from "react";
 import type { Layer, Slide, TextLayer } from "../../model/types";
 import { imageSlots as getImageSlots } from "../../model/layouts";
+import { useId } from "react";
 import { useEditorStore } from "../../model/store";
 
 interface SlidePreviewProps {
@@ -35,27 +37,28 @@ function PreviewLayer({ layer, slide, assets }: { layer: Layer; slide: Slide; as
   if (layer.type === "shape") {
     const shadowId = `preview-shape-shadow-${slide.id}-${layer.id}`;
     const path = vectorPath(layer);
-    if (path) return <g transform={transform}><path transform={`translate(${layer.x} ${layer.y}) rotate(${layer.rotation})`} d={path}
+    const shadowDefinition = hasShadow(layer) ? <defs><filter id={shadowId} x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx={layer.shadowOffsetX ?? 0} dy={layer.shadowOffsetY ?? (layer.shadow ?? 0) * 0.35} stdDeviation={(layer.shadow ?? 0) / 2} floodColor={layer.shadowColor ?? "#000000"} floodOpacity={layer.shadowOpacity ?? 0.32} /></filter></defs> : null;
+    if (path) return <g transform={transform}>{shadowDefinition}<path filter={hasShadow(layer) ? `url(#${shadowId})` : undefined} transform={`translate(${layer.x} ${layer.y}) rotate(${layer.rotation})`} d={path}
       fill={layer.fillVisible === false ? "none" : layer.fill} fillOpacity={layer.fillOpacity ?? 1} opacity={layer.opacity ?? 1}
       stroke={layer.strokeVisible === false ? undefined : layer.stroke} strokeOpacity={layer.strokeOpacity ?? 1} strokeWidth={layer.strokeWidth ?? 0} strokeLinecap="round" strokeLinejoin="round" /></g>;
     const paintShape = (color: string, opacity: number, key: string) => layer.shape === "ellipse"
       ? <ellipse key={key} cx={layer.x + layer.width / 2} cy={layer.y + layer.height / 2} rx={layer.width / 2} ry={layer.height / 2} fill={color} fillOpacity={opacity} opacity={layer.opacity ?? 1} />
       : <rect key={key} x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.cornerRadius} fill={color} fillOpacity={opacity} opacity={layer.opacity ?? 1} />;
     return <g transform={transform}>
-      {layer.shadow ? <defs><filter id={shadowId} x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx={layer.shadowOffsetX ?? 0} dy={layer.shadowOffsetY ?? layer.shadow * 0.35} stdDeviation={layer.shadow / 2} floodColor={layer.shadowColor ?? "#000000"} floodOpacity={layer.shadowOpacity ?? 0.32} /></filter></defs> : null}
+      {shadowDefinition}
       {(layer.additionalFills ?? []).filter((paint) => paint.visible).map((paint) => paintShape(paint.color, paint.opacity, paint.id))}
       {layer.shape === "ellipse" ? (
-        <ellipse cx={layer.x + layer.width / 2} cy={layer.y + layer.height / 2} rx={layer.width / 2} ry={layer.height / 2} fill={layer.fill} fillOpacity={layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1} opacity={layer.opacity ?? 1} stroke={layer.strokeVisible === false ? undefined : layer.stroke} strokeOpacity={layer.strokeOpacity ?? 1} strokeWidth={layer.strokeWidth ?? 0} filter={layer.shadow ? `url(#${shadowId})` : undefined} />
+        <ellipse cx={layer.x + layer.width / 2} cy={layer.y + layer.height / 2} rx={layer.width / 2} ry={layer.height / 2} fill={layer.fill} fillOpacity={layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1} opacity={layer.opacity ?? 1} stroke={layer.strokeVisible === false ? undefined : layer.stroke} strokeOpacity={layer.strokeOpacity ?? 1} strokeWidth={layer.strokeWidth ?? 0} filter={hasShadow(layer) ? `url(#${shadowId})` : undefined} />
       ) : (
-        <rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.cornerRadius} fill={layer.fill} fillOpacity={layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1} opacity={layer.opacity ?? 1} stroke={layer.strokeVisible === false ? undefined : layer.stroke} strokeOpacity={layer.strokeOpacity ?? 1} strokeWidth={layer.strokeWidth ?? 0} filter={layer.shadow ? `url(#${shadowId})` : undefined} />
+        <rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.cornerRadius} fill={layer.fill} fillOpacity={layer.fillVisible === false ? 0 : layer.fillOpacity ?? 1} opacity={layer.opacity ?? 1} stroke={layer.strokeVisible === false ? undefined : layer.stroke} strokeOpacity={layer.strokeOpacity ?? 1} strokeWidth={layer.strokeWidth ?? 0} filter={hasShadow(layer) ? `url(#${shadowId})` : undefined} />
       )}
     </g>;
   }
   if (layer.type === "image") {
     const url = assets[layer.assetId]?.url;
     if (url) return <g transform={transform}>
-      <defs><clipPath id={`preview-image-clip-${slide.id}-${layer.id}`}><rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.cornerRadius} /></clipPath>{layer.shadow ? <filter id={`preview-image-shadow-${slide.id}-${layer.id}`} x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx={layer.shadowOffsetX ?? 0} dy={layer.shadowOffsetY ?? layer.shadow * 0.35} stdDeviation={layer.shadow / 2} floodColor={layer.shadowColor ?? "#000000"} floodOpacity={layer.shadowOpacity ?? 0.32} /></filter> : null}</defs>
-        <image href={url} x={layer.x} y={layer.y} width={layer.width} height={layer.height} preserveAspectRatio="xMidYMid slice" opacity={layer.opacity} clipPath={`url(#preview-image-clip-${slide.id}-${layer.id})`} filter={layer.shadow ? `url(#preview-image-shadow-${slide.id}-${layer.id})` : undefined} />
+      <defs><clipPath id={`preview-image-clip-${slide.id}-${layer.id}`}><rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.cornerRadius} /></clipPath>{hasShadow(layer) ? <filter id={`preview-image-shadow-${slide.id}-${layer.id}`} x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx={layer.shadowOffsetX ?? 0} dy={layer.shadowOffsetY ?? (layer.shadow ?? 0) * 0.35} stdDeviation={(layer.shadow ?? 0) / 2} floodColor={layer.shadowColor ?? "#000000"} floodOpacity={layer.shadowOpacity ?? 0.32} /></filter> : null}</defs>
+        <image href={url} x={layer.x} y={layer.y} width={layer.width} height={layer.height} preserveAspectRatio="xMidYMid slice" opacity={layer.opacity} clipPath={`url(#preview-image-clip-${slide.id}-${layer.id})`} filter={hasShadow(layer) ? `url(#preview-image-shadow-${slide.id}-${layer.id})` : undefined} />
         {layer.stroke && (layer.strokeWidth ?? 0) > 0 && <rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.cornerRadius} fill="none" stroke={layer.strokeVisible === false ? undefined : layer.stroke} strokeOpacity={layer.strokeOpacity ?? 1} strokeWidth={layer.strokeWidth} />}
     </g>;
     return (
@@ -75,7 +78,7 @@ function PreviewLayer({ layer, slide, assets }: { layer: Layer; slide: Slide; as
   const textShadowId = `preview-text-shadow-${slide.id}-${layer.id}`;
   return (
     <g transform={transform}>
-    {layer.shadow ? <defs><filter id={textShadowId} x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx={layer.shadowOffsetX ?? 0} dy={layer.shadowOffsetY ?? layer.shadow * 0.35} stdDeviation={layer.shadow / 2} floodColor={layer.shadowColor ?? "#000000"} floodOpacity={layer.shadowOpacity ?? 0.32} /></filter></defs> : null}
+    {hasShadow(layer) ? <defs><filter id={textShadowId} x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx={layer.shadowOffsetX ?? 0} dy={layer.shadowOffsetY ?? (layer.shadow ?? 0) * 0.35} stdDeviation={(layer.shadow ?? 0) / 2} floodColor={layer.shadowColor ?? "#000000"} floodOpacity={layer.shadowOpacity ?? 0.32} /></filter></defs> : null}
     {(layer.additionalFills ?? []).filter((paint) => paint.visible).map((paint) => <text key={paint.id} x={x} y={layer.y + fontSize} fill={paint.color} fillOpacity={paint.opacity} opacity={layer.opacity} textAnchor={anchor} fontFamily={layer.fontFamily} fontSize={fontSize} fontWeight={layer.fontWeight} fontStyle={layer.italic ? "italic" : undefined} letterSpacing={layer.letterSpacing}>{lines.map((line, index) => <tspan key={index} x={x} dy={index === 0 ? 0 : lineStep}>{line}</tspan>)}</text>)}
     <text
       x={x}
@@ -92,7 +95,7 @@ function PreviewLayer({ layer, slide, assets }: { layer: Layer; slide: Slide; as
       fontWeight={layer.fontWeight}
       fontStyle={layer.italic ? "italic" : undefined}
       letterSpacing={layer.letterSpacing}
-      filter={layer.shadow ? `url(#${textShadowId})` : undefined}
+      filter={hasShadow(layer) ? `url(#${textShadowId})` : undefined}
     >
       {lines.map((line, index) => <tspan key={index} x={x} dy={index === 0 ? 0 : lineStep}>{line}</tspan>)}
     </text>
@@ -109,10 +112,12 @@ export function SlidePreview({ slide, className = "", style, emptyImageSlots = f
     ? Array.from({ length: slots.length }, (_, index) => index)
     : [];
 
+  const clipPrefix = useId();
   return (
     <div className={`relative overflow-hidden rounded-md bg-black/10 ${className}`} style={style}>
       <svg viewBox={`0 0 ${slide.width} ${slide.height}`} className="block size-full" role="img" aria-label="Slide design preview" preserveAspectRatio="xMidYMid meet">
         <defs>
+          {slide.layers.filter(isFrame).filter(frame => frame.clipContent).map(frame => <clipPath key={frame.id} id={clipPrefix + frame.id}><rect width={frame.width} height={frame.height} rx={frame.cornerRadius} transform={frameTransform(frame).toString()} /></clipPath>)}
           {slide.background.kind === "gradient" && (
             <linearGradient id={`preview-gradient-${slide.id}`} gradientTransform={`rotate(${slide.background.angle}, 0.5, 0.5)`}>
               <stop offset="0%" stopColor={slide.background.from} />
@@ -123,10 +128,12 @@ export function SlidePreview({ slide, className = "", style, emptyImageSlots = f
           {slide.background.kind === "image" && <clipPath id={`preview-bg-clip-${slide.id}`}><rect width={slide.width} height={slide.height} /></clipPath>}
         </defs>
         <g clipPath={slide.clipContent === false ? undefined : `url(#preview-clip-${slide.id})`}>
+          <g visibility={slide.backgroundVisible === false ? "hidden" : undefined}>
           <rect width={slide.width} height={slide.height} fill={background} fillOpacity={slide.background.kind === "solid" ? slide.background.opacity ?? 1 : 1} />
           {slide.background.kind === "image" && assets[slide.background.assetId]?.url && <image href={assets[slide.background.assetId].url} width={slide.width} height={slide.height} preserveAspectRatio="xMidYMid slice" clipPath={`url(#preview-bg-clip-${slide.id})`} />}
           {slide.background.kind === "image" && slide.background.dim > 0 && <rect width={slide.width} height={slide.height} fill="#000" opacity={slide.background.dim} />}
-          {orderedLayers(slide.layers).filter(layer => layer.visible !== false && !frameAncestors(layer, byId).some(parent => parent.visible === false)).map((layer) => <PreviewLayer key={layer.id} layer={layer} slide={slide} assets={assets} />)}
+          </g>
+          {orderedLayers(slide.layers).filter(layer => layer.visible !== false && !frameAncestors(layer, byId).some(parent => parent.visible === false)).map((layer) => <g key={layer.id}>{frameAncestors(layer, byId).filter(frame => frame.clipContent).reduceRight<ReactNode>((child, frame) => <g clipPath={`url(#${clipPrefix + frame.id})`}>{child}</g>, <PreviewLayer layer={layer} slide={slide} assets={assets} />)}</g>)}
           {slide.strokeVisible !== false && slide.stroke && (slide.strokeWidth ?? 0) > 0 && <rect x={slide.strokeWidth! / 2} y={slide.strokeWidth! / 2} width={Math.max(0, slide.width - slide.strokeWidth!)} height={Math.max(0, slide.height - slide.strokeWidth!)} rx={slide.cornerRadius} fill="none" stroke={slide.stroke} strokeOpacity={slide.strokeOpacity ?? 1} strokeWidth={slide.strokeWidth} />}
           {imageSlots.map((slot) => {
             const imageLayers = slide.layers.filter((layer) => layer.type === "image");

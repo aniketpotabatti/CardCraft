@@ -1,3 +1,4 @@
+import { pageName } from "../../model/names";
 import { useRef, useState } from "react";
 import { ArrowUpRight, Move } from "lucide-react";
 import { SlidePreview } from "../panels/SlidePreview";
@@ -37,8 +38,7 @@ export function BoardView({ zoom, onOpenPage }: { zoom: number; onOpenPage: () =
       {project.slides.map((slide, index) => {
         const selected = slide.id === selectedId;
         const width = slide.width > slide.height ? 300 : 220;
-        const titleLayer = slide.layers.find((layer) => layer.type === "text");
-        const label = titleLayer?.type === "text" && titleLayer.text.trim() ? titleLayer.text.trim().split("\n")[0] : `Page ${index + 1}`;
+        const label = pageName(slide, index);
         return <article key={slide.id} className="w-[220px]" style={{ width }}>
           <button type="button" onClick={() => selectSlide(slide.id)} onDoubleClick={() => { selectSlide(slide.id); onOpenPage(); }} aria-pressed={selected} className={`group relative block w-full overflow-hidden rounded-lg border bg-[var(--bg-surface)] p-1.5 text-left shadow-lg transition ${selected ? "border-sky-400 ring-2 ring-sky-400/30" : "border-[var(--border-strong)] hover:border-sky-400/60"}`}>
             <SlidePreview slide={slide} className="w-full rounded" style={{ aspectRatio: `${slide.width} / ${slide.height}` }} />
